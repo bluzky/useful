@@ -1,6 +1,7 @@
 defmodule DataMatcherTest do
   use ExUnit.Case
   doctest DataMatcher
+  doctest DataMatcher.JSON
 
   describe "match/2 - exact value matching" do
     test "matches identical primitives" do
@@ -299,37 +300,37 @@ defmodule DataMatcherTest do
 
   describe "to_json/1" do
     test "encodes simple patterns" do
-      assert DataMatcher.to_json(%{name: "me"}) == "{\"name\":\"me\"}"
-      assert DataMatcher.to_json(%{age: 25}) == "{\"age\":25}"
-      assert DataMatcher.to_json("simple") == "\"simple\""
-      assert DataMatcher.to_json(123) == "123"
-      assert DataMatcher.to_json(true) == "true"
-      assert DataMatcher.to_json(nil) == "null"
+      assert DataMatcher.JSON.encode(%{name: "me"}) == "{\"name\":\"me\"}"
+      assert DataMatcher.JSON.encode(%{age: 25}) == "{\"age\":25}"
+      assert DataMatcher.JSON.encode("simple") == "\"simple\""
+      assert DataMatcher.JSON.encode(123) == "123"
+      assert DataMatcher.JSON.encode(true) == "true"
+      assert DataMatcher.JSON.encode(nil) == "null"
     end
 
     test "converts atoms to strings" do
-      assert DataMatcher.to_json(:admin) == "\"admin\""
-      assert DataMatcher.to_json(%{role: :admin}) == "{\"role\":\"admin\"}"
-      assert DataMatcher.to_json(%{status: :active}) == "{\"status\":\"active\"}"
+      assert DataMatcher.JSON.encode(:admin) == "\"admin\""
+      assert DataMatcher.JSON.encode(%{role: :admin}) == "{\"role\":\"admin\"}"
+      assert DataMatcher.JSON.encode(%{status: :active}) == "{\"status\":\"active\"}"
     end
 
     test "encodes lists" do
-      assert DataMatcher.to_json([1, 2, 3]) == "[1,2,3]"
-      assert DataMatcher.to_json(["a", "b"]) == "[\"a\",\"b\"]"
-      assert DataMatcher.to_json([]) == "[]"
+      assert DataMatcher.JSON.encode([1, 2, 3]) == "[1,2,3]"
+      assert DataMatcher.JSON.encode(["a", "b"]) == "[\"a\",\"b\"]"
+      assert DataMatcher.JSON.encode([]) == "[]"
     end
 
     test "encodes quantifiers with proper $quantifier format" do
       pattern = DataMatcher.any(%{enabled: true})
-      result = DataMatcher.to_json(pattern)
+      result = DataMatcher.JSON.encode(pattern)
       assert result == "{\"$quantifier\":\"any\",\"pattern\":{\"enabled\":true}}"
 
       pattern = DataMatcher.all("admin")
-      result = DataMatcher.to_json(pattern)
+      result = DataMatcher.JSON.encode(pattern)
       assert result == "{\"$quantifier\":\"all\",\"pattern\":\"admin\"}"
 
       pattern = DataMatcher.none(%{role: :user})
-      result = DataMatcher.to_json(pattern)
+      result = DataMatcher.JSON.encode(pattern)
       assert result == "{\"$quantifier\":\"none\",\"pattern\":{\"role\":\"user\"}}"
     end
 
@@ -339,7 +340,7 @@ defmodule DataMatcherTest do
         permissions: DataMatcher.any("write")
       }
 
-      result = DataMatcher.to_json(pattern)
+      result = DataMatcher.JSON.encode(pattern)
 
       expected =
         "{\"permissions\":{\"$quantifier\":\"any\",\"pattern\":\"write\"},\"user\":{\"role\":\"admin\"}}"
@@ -349,7 +350,7 @@ defmodule DataMatcherTest do
 
     test "encodes list with quantifiers" do
       pattern = [%{role: "admin"}, DataMatcher.any(%{active: true})]
-      result = DataMatcher.to_json(pattern)
+      result = DataMatcher.JSON.encode(pattern)
       expected = "[{\"role\":\"admin\"},{\"$quantifier\":\"any\",\"pattern\":{\"active\":true}}]"
       assert result == expected
     end
@@ -357,29 +358,29 @@ defmodule DataMatcherTest do
 
   describe "from_json/1" do
     test "decodes simple patterns" do
-      assert DataMatcher.from_json("{\"name\":\"me\"}") == {:ok, %{"name" => "me"}}
-      assert DataMatcher.from_json("{\"age\":25}") == {:ok, %{"age" => 25}}
-      assert DataMatcher.from_json("\"simple\"") == {:ok, "simple"}
-      assert DataMatcher.from_json("123") == {:ok, 123}
-      assert DataMatcher.from_json("true") == {:ok, true}
-      assert DataMatcher.from_json("null") == {:ok, nil}
+      assert DataMatcher.JSON.decode("{\"name\":\"me\"}") == {:ok, %{"name" => "me"}}
+      assert DataMatcher.JSON.decode("{\"age\":25}") == {:ok, %{"age" => 25}}
+      assert DataMatcher.JSON.decode("\"simple\"") == {:ok, "simple"}
+      assert DataMatcher.JSON.decode("123") == {:ok, 123}
+      assert DataMatcher.JSON.decode("true") == {:ok, true}
+      assert DataMatcher.JSON.decode("null") == {:ok, nil}
     end
 
     test "decodes lists" do
-      assert DataMatcher.from_json("[1,2,3]") == {:ok, [1, 2, 3]}
-      assert DataMatcher.from_json("[\"a\",\"b\"]") == {:ok, ["a", "b"]}
-      assert DataMatcher.from_json("[]") == {:ok, []}
+      assert DataMatcher.JSON.decode("[1,2,3]") == {:ok, [1, 2, 3]}
+      assert DataMatcher.JSON.decode("[\"a\",\"b\"]") == {:ok, ["a", "b"]}
+      assert DataMatcher.JSON.decode("[]") == {:ok, []}
     end
 
     test "decodes quantifiers from $quantifier format" do
       json = "{\"$quantifier\":\"any\",\"pattern\":{\"enabled\":true}}"
-      assert DataMatcher.from_json(json) == {:ok, {:quantifier, :any, %{"enabled" => true}}}
+      assert DataMatcher.JSON.decode(json) == {:ok, {:quantifier, :any, %{"enabled" => true}}}
 
       json = "{\"$quantifier\":\"all\",\"pattern\":\"admin\"}"
-      assert DataMatcher.from_json(json) == {:ok, {:quantifier, :all, "admin"}}
+      assert DataMatcher.JSON.decode(json) == {:ok, {:quantifier, :all, "admin"}}
 
       json = "{\"$quantifier\":\"none\",\"pattern\":{\"role\":\"user\"}}"
-      assert DataMatcher.from_json(json) == {:ok, {:quantifier, :none, %{"role" => "user"}}}
+      assert DataMatcher.JSON.decode(json) == {:ok, {:quantifier, :none, %{"role" => "user"}}}
     end
 
     test "decodes complex nested structures" do
@@ -391,58 +392,58 @@ defmodule DataMatcherTest do
         "permissions" => {:quantifier, :any, "write"}
       }
 
-      assert DataMatcher.from_json(json) == {:ok, expected}
+      assert DataMatcher.JSON.decode(json) == {:ok, expected}
     end
 
     test "preserves string keys (doesn't convert to atoms)" do
       json = "{\"key\":\"value\"}"
-      {:ok, result} = DataMatcher.from_json(json)
+      {:ok, result} = DataMatcher.JSON.decode(json)
       # Key should be string, not atom
       assert is_binary(hd(Map.keys(result)))
     end
 
     test "handles null values" do
       json = "{\"key\":null}"
-      assert DataMatcher.from_json(json) == {:ok, %{"key" => nil}}
+      assert DataMatcher.JSON.decode(json) == {:ok, %{"key" => nil}}
     end
 
     # Error cases
     test "returns error for invalid JSON" do
-      assert {:error, "Invalid JSON"} = DataMatcher.from_json("invalid json")
-      assert {:error, "Invalid JSON"} = DataMatcher.from_json("{invalid}")
-      assert {:error, "Invalid JSON"} = DataMatcher.from_json("{\"key\":}")
+      assert {:error, "Invalid JSON"} = DataMatcher.JSON.decode("invalid json")
+      assert {:error, "Invalid JSON"} = DataMatcher.JSON.decode("{invalid}")
+      assert {:error, "Invalid JSON"} = DataMatcher.JSON.decode("{\"key\":}")
     end
 
     test "returns error for empty JSON string" do
-      assert DataMatcher.from_json("") == {:error, "Empty JSON string"}
+      assert DataMatcher.JSON.decode("") == {:error, "Empty JSON string"}
     end
 
     test "returns error for unknown quantifier" do
       json = "{\"$quantifier\":\"invalid\",\"pattern\":{}}"
-      assert {:error, error_msg} = DataMatcher.from_json(json)
+      assert {:error, error_msg} = DataMatcher.JSON.decode(json)
       assert String.contains?(error_msg, "Unknown quantifier")
     end
 
     test "handles malformed quantifier structure" do
       # Missing pattern
       json = "{\"$quantifier\":\"any\"}"
-      assert {:error, _} = DataMatcher.from_json(json)
+      assert {:error, _} = DataMatcher.JSON.decode(json)
     end
   end
 
   describe "JSON round-trip encoding/decoding" do
     test "simple patterns survive round-trip" do
       original = %{name: "test", age: 25}
-      json = DataMatcher.to_json(original)
-      {:ok, decoded} = DataMatcher.from_json(json)
+      json = DataMatcher.JSON.encode(original)
+      {:ok, decoded} = DataMatcher.JSON.decode(json)
       # Note: keys become strings after JSON round-trip
       assert decoded == %{"name" => "test", "age" => 25}
     end
 
     test "quantifiers survive round-trip" do
       original = DataMatcher.any(%{enabled: true})
-      json = DataMatcher.to_json(original)
-      {:ok, decoded} = DataMatcher.from_json(json)
+      json = DataMatcher.JSON.encode(original)
+      {:ok, decoded} = DataMatcher.JSON.decode(json)
       assert decoded == {:quantifier, :any, %{"enabled" => true}}
     end
 
@@ -453,8 +454,8 @@ defmodule DataMatcherTest do
         teams: DataMatcher.all(%{active: true})
       }
 
-      json = DataMatcher.to_json(original)
-      {:ok, decoded} = DataMatcher.from_json(json)
+      json = DataMatcher.JSON.encode(original)
+      {:ok, decoded} = DataMatcher.JSON.decode(json)
 
       expected = %{
         "user" => %{"role" => "admin"},
@@ -468,8 +469,8 @@ defmodule DataMatcherTest do
     test "decoded patterns work in matching" do
       # Create pattern, encode to JSON, decode, and use for matching
       original_pattern = %{team: "*-octosell", members: DataMatcher.any("alice")}
-      json = DataMatcher.to_json(original_pattern)
-      {:ok, decoded_pattern} = DataMatcher.from_json(json)
+      json = DataMatcher.JSON.encode(original_pattern)
+      {:ok, decoded_pattern} = DataMatcher.JSON.decode(json)
 
       data = %{"team" => "dev-octosell", "members" => ["alice", "bob"]}
       assert DataMatcher.match(data, decoded_pattern) == true

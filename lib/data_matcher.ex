@@ -70,113 +70,6 @@ defmodule DataMatcher do
   @spec none(any()) :: {:quantifier, :none, any()}
   def none(pattern), do: {:quantifier, :none, pattern}
 
-  @doc """
-  Encode patterns to JSON string for storage/transmission.
-
-  ## Examples
-
-      iex> DataMatcher.to_json(%{name: "me"})
-      "{\\"name\\":\\"me\\"}"
-
-      iex> DataMatcher.to_json(DataMatcher.any(%{enabled: true}))
-      "{\\"$quantifier\\":\\"any\\",\\"pattern\\":{\\"enabled\\":true}}"
-
-  """
-  @spec to_json(any()) :: String.t()
-  def to_json(pattern) do
-    pattern
-    |> convert_pattern_to_json()
-    |> Jason.encode!()
-  end
-
-  @doc """
-  Load patterns from JSON string.
-
-  ## Examples
-
-      iex> DataMatcher.from_json("{\\"name\\":\\"me\\"}")
-      {:ok, %{"name" => "me"}}
-
-
-      iex> DataMatcher.from_json("invalid json")
-      {:error, "Invalid JSON"}
-  """
-  @spec from_json(String.t()) :: {:ok, any()} | {:error, String.t()}
-  def from_json(json_string) do
-    cond do
-      json_string == "" ->
-        {:error, "Empty JSON string"}
-
-      true ->
-        case Jason.decode(json_string) do
-          {:ok, decoded} ->
-            try do
-              pattern = convert_json_to_pattern(decoded)
-              {:ok, pattern}
-            rescue
-              error -> {:error, "Pattern conversion error: #{inspect(error)}"}
-            end
-
-          {:error, %Jason.DecodeError{}} ->
-            {:error, "Invalid JSON"}
-
-          {:error, error} ->
-            {:error, "JSON decode error: #{inspect(error)}"}
-        end
-    end
-  end
-
-  # Convert internal pattern format to JSON-serializable format
-  defp convert_pattern_to_json({:quantifier, type, sub_pattern}) do
-    %{
-      "$quantifier" => Atom.to_string(type),
-      "pattern" => convert_pattern_to_json(sub_pattern)
-    }
-  end
-
-  defp convert_pattern_to_json(pattern) when is_map(pattern) do
-    pattern
-    |> Enum.map(fn {key, value} ->
-      {key, convert_pattern_to_json(value)}
-    end)
-    |> Enum.into(%{})
-  end
-
-  defp convert_pattern_to_json(pattern) when is_list(pattern) do
-    Enum.map(pattern, &convert_pattern_to_json/1)
-  end
-
-  defp convert_pattern_to_json(pattern)
-       when is_atom(pattern) and pattern not in [true, false, nil] do
-    Atom.to_string(pattern)
-  end
-
-  defp convert_pattern_to_json(pattern), do: pattern
-
-  # Convert JSON representation back to internal pattern format
-  defp convert_json_to_pattern(data) when is_map(data) do
-    case data do
-      %{"$quantifier" => type, "pattern" => pattern} ->
-        case type do
-          "any" -> {:quantifier, :any, convert_json_to_pattern(pattern)}
-          "all" -> {:quantifier, :all, convert_json_to_pattern(pattern)}
-          "none" -> {:quantifier, :none, convert_json_to_pattern(pattern)}
-          _ -> raise "Unknown quantifier: #{type}"
-        end
-
-      regular_map ->
-        regular_map
-        |> Enum.map(fn {key, value} -> {key, convert_json_to_pattern(value)} end)
-        |> Enum.into(%{})
-    end
-  end
-
-  defp convert_json_to_pattern(data) when is_list(data) do
-    Enum.map(data, &convert_json_to_pattern/1)
-  end
-
-  defp convert_json_to_pattern(data), do: data
-
   # Main matching logic
   defp do_match(data, pattern) do
     case pattern do
@@ -279,4 +172,144 @@ defmodule DataMatcher do
       {:error, _} -> false
     end
   end
+end
+
+defmodule DataMatcher.JSON do
+  @doc """
+  Encode patterns to JSON string for storage/transmission.
+
+  ## Examples
+
+      iex> DataMatcher.JSON.encode(%{name: "me"})
+      "{\\"name\\":\\"me\\"}"
+
+      iex> DataMatcher.JSON.encode(DataMatcher.any(%{enabled: true}))
+      "{\\"$quantifier\\":\\"any\\",\\"pattern\\":{\\"enabled\\":true}}"
+
+  """
+  @spec encode(any()) :: String.t()
+  def encode(pattern) do
+    pattern
+    |> convert_pattern_to_json()
+    |> Jason.encode!()
+  end
+
+  @doc """
+  Load patterns from JSON string.
+
+  ## Examples
+
+      iex> DataMatcher.JSON.decode("{\\"name\\":\\"me\\"}")
+      {:ok, %{"name" => "me"}}
+
+
+      iex> DataMatcher.JSON.decode("invalid json")
+      {:error, "Invalid JSON"}
+  """
+  @spec decode(String.t()) :: {:ok, any()} | {:error, String.t()}
+  def decode(json_string) do
+    cond do
+      json_string == "" ->
+        {:error, "Empty JSON string"}
+
+      true ->
+        case Jason.decode(json_string) do
+          {:ok, decoded} ->
+            convert_json_to_pattern(decoded)
+
+          {:error, %Jason.DecodeError{}} ->
+            {:error, "Invalid JSON"}
+
+          {:error, error} ->
+            {:error, "JSON decode error: #{inspect(error)}"}
+        end
+    end
+  end
+
+  # Convert internal pattern format to JSON-serializable format
+  defp convert_pattern_to_json({:quantifier, type, sub_pattern}) do
+    %{
+      "$quantifier" => Atom.to_string(type),
+      "pattern" => convert_pattern_to_json(sub_pattern)
+    }
+  end
+
+  defp convert_pattern_to_json(pattern) when is_map(pattern) do
+    pattern
+    |> Enum.map(fn {key, value} ->
+      json_key = if is_atom(key), do: Atom.to_string(key), else: key
+      {json_key, convert_pattern_to_json(value)}
+    end)
+    |> Enum.into(%{})
+  end
+
+  defp convert_pattern_to_json(pattern) when is_list(pattern) do
+    Enum.map(pattern, &convert_pattern_to_json/1)
+  end
+
+  defp convert_pattern_to_json(pattern)
+       when is_atom(pattern) and pattern not in [true, false, nil] do
+    Atom.to_string(pattern)
+  end
+
+  defp convert_pattern_to_json(pattern), do: pattern
+
+  # Convert JSON representation back to internal pattern format
+  defp convert_json_to_pattern(data) when is_map(data) do
+    case data do
+      %{"$quantifier" => type, "pattern" => pattern} ->
+        case type do
+          "any" ->
+            case convert_json_to_pattern(pattern) do
+              {:ok, converted_pattern} -> {:ok, {:quantifier, :any, converted_pattern}}
+              error -> error
+            end
+
+          "all" ->
+            case convert_json_to_pattern(pattern) do
+              {:ok, converted_pattern} -> {:ok, {:quantifier, :all, converted_pattern}}
+              error -> error
+            end
+
+          "none" ->
+            case convert_json_to_pattern(pattern) do
+              {:ok, converted_pattern} -> {:ok, {:quantifier, :none, converted_pattern}}
+              error -> error
+            end
+
+          _ ->
+            {:error, "Unknown quantifier: #{type}"}
+        end
+
+      %{"$quantifier" => _type} ->
+        # Quantifier without pattern key is malformed
+        {:error, "Malformed quantifier: missing 'pattern' key"}
+
+      regular_map ->
+        converted_map =
+          Enum.reduce_while(regular_map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+            case convert_json_to_pattern(value) do
+              {:ok, converted_value} -> {:cont, {:ok, Map.put(acc, key, converted_value)}}
+              error -> {:halt, error}
+            end
+          end)
+
+        converted_map
+    end
+  end
+
+  defp convert_json_to_pattern(data) when is_list(data) do
+    Enum.reduce_while(data, {:ok, []}, fn item, {:ok, acc} ->
+      case convert_json_to_pattern(item) do
+        {:ok, converted_item} -> {:cont, {:ok, [converted_item | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, reversed_list} -> {:ok, Enum.reverse(reversed_list)}
+      error -> error
+    end
+  end
+
+  defp convert_json_to_pattern(data), do: {:ok, data}
 end
