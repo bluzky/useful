@@ -1,21 +1,19 @@
-# Useful
+# Collection of useful helper modules that just copy and add to your project
 
-**TODO: Add description**
+### 1. RedisLock
+A simple implement of redis lock using Redix
 
-## Installation
+### 2. DefEnum
+Macro to define enum
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `useful` to your list of dependencies in `mix.exs`:
+### 3. QueryFilter
+Helper to build query dynamically from map or list of conditions
 
-```elixir
-def deps do
-  [
-    {:useful, "~> 0.1.0"}
-  ]
-end
-```
+### 4. Nested
+Helper to work with nested collection
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/useful>.
+### 5. DataMatcher
+Matching data against simple rule. Support primitives, collections and nested collection
 
+### 6. Crypto
+Simple wrapper to work with crypto, with a predefine alg
