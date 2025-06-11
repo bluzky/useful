@@ -27,7 +27,9 @@ defmodule Useful.MixProject do
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.0"},
       {:skema, "~> 0.2.2"},
-      {:redix, "~> 1.5"}
+      {:redix, "~> 1.5"},
+      {:phoenix_pubsub, "~> 2.1"},
+      {:phoenix_pubsub_redis, "~> 3.0"}
     ]
   end
 end
