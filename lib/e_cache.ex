@@ -1,7 +1,7 @@
 defmodule ECache do
   @moduledoc """
-  Distributed cache implementation using local ETS storage with Redis-based PubSub
-  for cross-node invalidation.
+  Distributed cache implementation with pluggable storage adapters (ETS or Mnesia)
+  and Redis-based PubSub for cross-node invalidation.
 
   ## Setup
 
@@ -27,8 +27,9 @@ defmodule ECache do
 
       # config/config.exs
       config :ecache,
-        ttl: 3600,              # Default TTL in seconds (1 hour)
-        error_ttl: 60,          # Error cache TTL in seconds (1 minute)
+        adapter: ECache.Adapters.ETS,     # or ECache.Adapters.Mnesia
+        ttl: 3600,                        # Default TTL in seconds (1 hour)
+        error_ttl: 60,                    # Error cache TTL in seconds (1 minute)
         pubsub_mod: ECache.PubSub
 
   ### 3. Add dependencies to mix.exs
@@ -39,6 +40,20 @@ defmodule ECache do
           {:phoenix_pubsub_redis, "~> 3.0"}
         ]
       end
+
+  ## Storage Adapters
+
+  ### ETS Adapter
+  - Fast in-memory storage
+  - Single node only
+  - No persistence
+  - Best for development and single-node deployments
+
+  ### Mnesia Adapter
+  - Distributed storage across nodes
+  - Optional disk persistence
+  - ACID transactions
+  - Best for multi-node production deployments
 
   ## Usage
 
@@ -66,6 +81,23 @@ defmodule ECache do
   @default_ttl Application.compile_env(:ecache, :ttl, 3600)
   @default_error_ttl Application.compile_env(:ecache, :error_ttl, 60)
   @pubsub Application.compile_env(:ecache, :pubsub_mod, ECache.PubSub)
+  @adapter Application.compile_env(:ecache, :adapter, ECache.Adapters.ETS)
+
+  defp adapter(), do: Application.get_env(:ecache, :adapter, @adapter)
+  defp table_name(), do: :persistent_term.get({__MODULE__, :table_name}, @table_name)
+
+  ## Storage Adapter Behaviour
+
+  @callback init_storage(table_name :: atom()) :: :ok | {:error, term()}
+  @callback get(table_name :: atom(), key :: term()) ::
+              {:ok, {value :: term(), expires_at :: integer()}} | :miss | {:error, term()}
+  @callback put(table_name :: atom(), key :: term(), value :: term(), expires_at :: integer()) ::
+              :ok | {:error, term()}
+  @callback delete(table_name :: atom(), key :: term()) :: :ok | {:error, term()}
+  @callback cleanup_expired(table_name :: atom(), current_time :: integer()) ::
+              :ok | {:error, term()}
+  @callback clear(table_name :: atom()) :: :ok | {:error, term()}
+  @callback stats(table_name :: atom()) :: map()
 
   ## Public API
 
@@ -201,22 +233,20 @@ defmodule ECache do
   """
   @spec get(cache_key :: term()) :: {:ok, term()} | :miss
   def get(cache_key) do
-    try do
-      case :ets.lookup(@table_name, cache_key) do
-        [{^cache_key, value, expires_at}] ->
-          if System.system_time(:second) < expires_at do
-            {:ok, value}
-          else
-            :ets.delete(@table_name, cache_key)
-            :miss
-          end
-
-        [] ->
+    case adapter().get(table_name(), cache_key) do
+      {:ok, {value, expires_at}} ->
+        if System.system_time(:second) < expires_at do
+          {:ok, value}
+        else
+          adapter().delete(table_name(), cache_key)
           :miss
-      end
-    catch
-      kind, reason ->
-        Logger.error("Cache get failed: #{inspect({kind, reason})}")
+        end
+
+      :miss ->
+        :miss
+
+      {:error, reason} ->
+        Logger.error("Cache get failed: #{inspect(reason)}")
         :miss
     end
   end
@@ -244,14 +274,15 @@ defmodule ECache do
   """
   @spec put(cache_key :: term(), value :: term(), opts :: keyword()) :: :ok
   def put(cache_key, value, opts \\ []) do
-    try do
-      ttl = Keyword.get(opts, :ttl, @default_ttl)
-      expires_at = System.system_time(:second) + ttl
-      :ets.insert(@table_name, {cache_key, value, expires_at})
-      :ok
-    catch
-      kind, reason ->
-        Logger.error("Cache put failed: #{inspect({kind, reason})}")
+    ttl = Keyword.get(opts, :ttl, @default_ttl)
+    expires_at = System.system_time(:second) + ttl
+
+    case adapter().put(table_name(), cache_key, value, expires_at) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Cache put failed: #{inspect(cache_key)} reason: #{inspect(reason)}")
         :ok
     end
   end
@@ -259,7 +290,7 @@ defmodule ECache do
   @doc """
   Delete value from cache and broadcast invalidation.
 
-  Removes the key from local ETS storage and broadcasts an invalidation
+  Removes the key from storage and broadcasts an invalidation
   message to all other nodes in the cluster via PubSub.
 
   ## Examples
@@ -272,22 +303,55 @@ defmodule ECache do
   """
   @spec delete(cache_key :: term()) :: :ok
   def delete(cache_key) do
-    try do
-      :ets.delete(@table_name, cache_key)
-      broadcast_invalidation(cache_key)
-      :ok
-    catch
-      kind, reason ->
-        Logger.error("Cache delete failed: #{inspect({kind, reason})}")
+    case adapter().delete(table_name(), cache_key) do
+      :ok ->
+        broadcast_invalidation(cache_key)
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Cache delete failed: #{inspect(reason)}")
         :ok
     end
+  end
+
+  @doc """
+  Clear all cache entries.
+
+  ## Examples
+
+      ECache.clear()
+      # => :ok
+  """
+  @spec clear() :: :ok
+  def clear do
+    case adapter().clear(table_name()) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Cache clear failed: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  @doc """
+  Get cache statistics.
+
+  ## Examples
+
+      ECache.stats()
+      # => %{size: 1234, memory: 56789}
+  """
+  @spec stats() :: map()
+  def stats do
+    adapter().stats(table_name())
   end
 
   @doc """
   Start the cache GenServer.
 
   This should be added to your application's supervision tree.
-  The GenServer manages the ETS table, PubSub subscriptions, and cleanup tasks.
+  The GenServer manages the storage, PubSub subscriptions, and cleanup tasks.
 
   ## Examples
 
@@ -305,8 +369,15 @@ defmodule ECache do
 
   @impl true
   def init(_opts) do
-    # Create ETS table
-    :ets.new(@table_name, [:set, :public, :named_table, read_concurrency: true])
+    # Initialize storage adapter
+    case adapter().init_storage(table_name()) do
+      :ok ->
+        Logger.info("Initialized cache with #{adapter()} adapter")
+
+      {:error, reason} ->
+        Logger.error("Failed to initialize cache storage: #{inspect(reason)}")
+        {:stop, reason}
+    end
 
     # Subscribe to PubSub for invalidation messages
     Phoenix.PubSub.subscribe(@pubsub, @topic)
@@ -320,7 +391,7 @@ defmodule ECache do
   @impl true
   def handle_info({:invalidate, cache_key}, state) do
     # Handle invalidation message from other nodes
-    :ets.delete(@table_name, cache_key)
+    adapter().delete(table_name(), cache_key)
     {:noreply, state}
   end
 
@@ -366,20 +437,258 @@ defmodule ECache do
   end
 
   defp cleanup_expired_entries do
-    try do
-      current_time = System.system_time(:second)
+    current_time = System.system_time(:second)
 
-      :ets.select_delete(@table_name, [
-        {{:_, :_, :"$1"}, [{:<, :"$1", current_time}], [true]}
-      ])
-    catch
-      kind, reason ->
-        Logger.error("Cache cleanup failed: #{inspect({kind, reason})}")
+    case adapter().cleanup_expired(table_name(), current_time) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Cache cleanup failed: #{inspect(reason)}")
     end
   end
 
   defp schedule_cleanup do
-    # Run cleanup every 1 minutes
+    # Run cleanup every 1 minute
     Process.send_after(self(), :cleanup, 60_000)
+  end
+end
+
+defmodule ECache.Adapters.ETS do
+  @moduledoc """
+  ETS storage adapter for ECache.
+  Provides fast in-memory storage for single-node deployments.
+  """
+
+  require Logger
+  @behaviour ECache
+
+  @impl true
+  def init_storage(table_name) do
+    try do
+      :ets.new(table_name, [:set, :public, :named_table, read_concurrency: true])
+      :ok
+    catch
+      :error, :badarg ->
+        # Table might already exist
+        :ok
+    end
+  end
+
+  @impl true
+  def get(table_name, key) do
+    try do
+      case :ets.lookup(table_name, key) do
+        [{^key, value, expires_at}] ->
+          {:ok, {value, expires_at}}
+
+        [] ->
+          :miss
+      end
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def put(table_name, key, value, expires_at) do
+    try do
+      :ets.insert(table_name, {key, value, expires_at})
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def delete(table_name, key) do
+    try do
+      :ets.delete(table_name, key)
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def cleanup_expired(table_name, current_time) do
+    try do
+      :ets.select_delete(table_name, [
+        {{:_, :_, :"$1"}, [{:<, :"$1", current_time}], [true]}
+      ])
+
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def clear(table_name) do
+    try do
+      :ets.delete_all_objects(table_name)
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def stats(table_name) do
+    try do
+      info = :ets.info(table_name)
+
+      %{
+        size: Keyword.get(info, :size, 0),
+        memory: Keyword.get(info, :memory, 0) * :erlang.system_info(:wordsize)
+      }
+    catch
+      _kind, _reason ->
+        %{size: 0, memory: 0}
+    end
+  end
+end
+
+defmodule ECache.Adapters.Mnesia do
+  @moduledoc """
+  Mnesia storage adapter for ECache.
+  Provides distributed storage with optional persistence for multi-node deployments.
+  """
+  require Logger
+  @behaviour ECache
+
+  @impl true
+  def init_storage(table_name) do
+    try do
+      # Create schema if it doesn't exist
+      case :mnesia.create_schema([node()]) do
+        :ok ->
+          Logger.info("Created Mnesia schema")
+
+        {:error, {_, {:already_exists, _}}} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Mnesia schema creation issue: #{inspect(reason)}")
+      end
+
+      :ok = :mnesia.start()
+
+      # Create table if it doesn't exist
+      case :mnesia.create_table(table_name,
+             attributes: [:key, :value, :expires_at],
+             type: :set,
+             storage_properties: [
+               ets: [read_concurrency: true, write_concurrency: true]
+             ]
+           ) do
+        {:atomic, :ok} ->
+          Logger.info("Created Mnesia table: #{table_name}")
+          :ok
+
+        {:aborted, {:already_exists, ^table_name}} ->
+          :ok
+
+        {:aborted, reason} ->
+          {:error, reason}
+      end
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def get(table_name, key) do
+    try do
+      case :mnesia.dirty_read(table_name, key) do
+        [{^table_name, ^key, value, expires_at}] ->
+          {:ok, {value, expires_at}}
+
+        [] ->
+          :miss
+      end
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def put(table_name, key, value, expires_at) do
+    try do
+      :mnesia.dirty_write(table_name, {key, value, expires_at})
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def delete(table_name, key) do
+    try do
+      :mnesia.dirty_delete(table_name, key)
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def cleanup_expired(table_name, current_time) do
+    try do
+      # Use Mnesia select to find expired keys
+      match_spec = [
+        {{table_name, :"$1", :"$2", :"$3"}, [{:<, :"$3", current_time}], [:"$1"]}
+      ]
+
+      expired_keys = :mnesia.dirty_select(table_name, match_spec)
+
+      Enum.each(expired_keys, fn key ->
+        :mnesia.dirty_delete(table_name, key)
+      end)
+
+      if length(expired_keys) > 0 do
+        Logger.debug("Cleaned up #{length(expired_keys)} expired cache entries")
+      end
+
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def clear(table_name) do
+    try do
+      :mnesia.clear_table(table_name)
+      :ok
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
+    end
+  end
+
+  @impl true
+  def stats(table_name) do
+    try do
+      info = :mnesia.table_info(table_name, :all)
+
+      %{
+        size: Keyword.get(info, :size, 0),
+        memory: Keyword.get(info, :memory, 0) * :erlang.system_info(:wordsize)
+      }
+    catch
+      _kind, _reason ->
+        %{size: 0, memory: 0}
+    end
   end
 end

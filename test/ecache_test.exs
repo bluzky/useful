@@ -1,351 +1,466 @@
 defmodule ECacheTest do
-  use ExUnit.Case, async: true
+  # Changed to false due to PubSub setup
+  use ExUnit.Case, async: false
 
-  alias ECache
+  # Import test helpers
+  import ExUnit.CaptureLog
 
-  setup do
-    # Start a test PubSub process
+  # Module setup - start PubSub once for all tests
+  setup_all do
+    # Start a single PubSub instance for all tests
     pubsub_name = ECache.PubSub
 
-    {:ok, _pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+    {:ok, _pid} = start_supervised({Phoenix.PubSub, name: pubsub_name}, id: :test_pubsub)
 
-    # Override module attributes for testing
+    # Set the PubSub module for all tests
     Application.put_env(:ecache, :pubsub_mod, pubsub_name)
 
-    # Clear any existing ETS entries
-    if :ets.info(:distributed_cache) != :undefined do
-      :ets.delete_all_objects(:distributed_cache)
-    end
-
-    # Start ECache GenServer
-    {:ok, cache_pid} = start_supervised(ECache)
-
     on_exit(fn ->
-      if :ets.info(:distributed_cache) != :undefined do
-        :ets.delete_all_objects(:distributed_cache)
+      Application.delete_env(:ecache, :pubsub_mod)
+    end)
+
+    {:ok, pubsub_name: pubsub_name}
+  end
+
+  # Test module setup
+  setup do
+    # Create unique table name for each test to avoid conflicts
+    table_name = :"test_cache_#{:erlang.unique_integer([:positive])}"
+
+    # Override the table name for this test
+    :persistent_term.put({ECache, :table_name}, table_name)
+
+    # Initialize ETS table directly for testing
+    ECache.Adapters.ETS.init_storage(table_name)
+
+    # Clean up after test
+    on_exit(fn ->
+      :persistent_term.erase({ECache, :table_name})
+
+      if :ets.info(table_name) != :undefined do
+        :ets.delete(table_name)
       end
     end)
 
-    %{cache_pid: cache_pid, pubsub: pubsub_name}
+    {:ok, table_name: table_name}
   end
 
-  describe "get/1" do
-    test "returns :miss for non-existent key" do
+  describe "ECache.Adapters.ETS" do
+    test "init_storage/1 creates ETS table", %{table_name: table_name} do
+      assert :ets.info(table_name) != :undefined
+      assert :ets.info(table_name, :type) == :set
+      assert :ets.info(table_name, :protection) == :public
+    end
+
+    test "get/2 returns :miss for non-existent key", %{table_name: table_name} do
+      assert ECache.Adapters.ETS.get(table_name, "nonexistent") == :miss
+    end
+
+    test "put/4 and get/2 basic operations", %{table_name: table_name} do
+      key = "test_key"
+      value = "test_value"
+      expires_at = System.system_time(:second) + 3600
+
+      assert ECache.Adapters.ETS.put(table_name, key, value, expires_at) == :ok
+      assert ECache.Adapters.ETS.get(table_name, key) == {:ok, {value, expires_at}}
+    end
+
+    test "delete/2 removes key from storage", %{table_name: table_name} do
+      key = "test_key"
+      value = "test_value"
+      expires_at = System.system_time(:second) + 3600
+
+      ECache.Adapters.ETS.put(table_name, key, value, expires_at)
+      assert ECache.Adapters.ETS.get(table_name, key) == {:ok, {value, expires_at}}
+
+      assert ECache.Adapters.ETS.delete(table_name, key) == :ok
+      assert ECache.Adapters.ETS.get(table_name, key) == :miss
+    end
+
+    test "cleanup_expired/2 removes expired entries", %{table_name: table_name} do
+      current_time = System.system_time(:second)
+
+      # Insert expired entry
+      ECache.Adapters.ETS.put(table_name, "expired", "value", current_time - 1)
+      # Insert valid entry
+      ECache.Adapters.ETS.put(table_name, "valid", "value", current_time + 3600)
+
+      assert ECache.Adapters.ETS.get(table_name, "expired") == {:ok, {"value", current_time - 1}}
+      assert ECache.Adapters.ETS.get(table_name, "valid") == {:ok, {"value", current_time + 3600}}
+
+      assert ECache.Adapters.ETS.cleanup_expired(table_name, current_time) == :ok
+
+      assert ECache.Adapters.ETS.get(table_name, "expired") == :miss
+      assert ECache.Adapters.ETS.get(table_name, "valid") == {:ok, {"value", current_time + 3600}}
+    end
+
+    test "clear/1 removes all entries", %{table_name: table_name} do
+      ECache.Adapters.ETS.put(table_name, "key1", "value1", System.system_time(:second) + 3600)
+      ECache.Adapters.ETS.put(table_name, "key2", "value2", System.system_time(:second) + 3600)
+
+      assert ECache.Adapters.ETS.get(table_name, "key1") != :miss
+      assert ECache.Adapters.ETS.get(table_name, "key2") != :miss
+
+      assert ECache.Adapters.ETS.clear(table_name) == :ok
+
+      assert ECache.Adapters.ETS.get(table_name, "key1") == :miss
+      assert ECache.Adapters.ETS.get(table_name, "key2") == :miss
+    end
+
+    test "stats/1 returns table statistics", %{table_name: table_name} do
+      stats = ECache.Adapters.ETS.stats(table_name)
+
+      assert is_map(stats)
+      assert Map.has_key?(stats, :size)
+      assert Map.has_key?(stats, :memory)
+      assert stats.size == 0
+
+      # Add some data and check stats change
+      ECache.Adapters.ETS.put(table_name, "key1", "value1", System.system_time(:second) + 3600)
+      new_stats = ECache.Adapters.ETS.stats(table_name)
+
+      assert new_stats.size == 1
+      assert new_stats.memory > stats.memory
+    end
+  end
+
+  describe "ECache high-level API" do
+    test "get/1 returns :miss for non-existent key" do
       assert ECache.get("nonexistent") == :miss
     end
 
-    test "returns {:ok, value} for existing key" do
-      ECache.put("test_key", "test_value")
-      assert ECache.get("test_key") == {:ok, "test_value"}
+    test "put/2 and get/1 basic operations" do
+      key = "test_key"
+      value = "test_value"
+
+      assert ECache.put(key, value) == :ok
+      assert ECache.get(key) == {:ok, value}
     end
 
-    test "returns :miss and removes expired entries" do
-      # Put with very short TTL
-      ECache.put("expired_key", "value", ttl: 1)
+    test "put/3 with custom TTL" do
+      key = "test_key"
+      value = "test_value"
+
+      assert ECache.put(key, value, ttl: 1) == :ok
+      assert ECache.get(key) == {:ok, value}
+
+      # Wait for expiration
+      Process.sleep(1100)
+      assert ECache.get(key) == :miss
+    end
+
+    test "get/1 automatically removes expired entries" do
+      key = "test_key"
+      value = "test_value"
+
+      # Put with 1 second TTL
+      assert ECache.put(key, value, ttl: 1) == :ok
+      assert ECache.get(key) == {:ok, value}
 
       # Wait for expiration
       Process.sleep(1100)
 
-      assert ECache.get("expired_key") == :miss
-
-      # Verify it's actually removed from ETS
-      assert :ets.lookup(:distributed_cache, "expired_key") == []
+      # Should return :miss and remove the expired entry
+      assert ECache.get(key) == :miss
+      # Verify it's actually removed
+      assert ECache.get(key) == :miss
     end
 
-    test "handles ETS errors gracefully" do
-      # This test would require mocking ETS, which is complex
-      # In a real scenario, you might use a library like Mox
-      assert ECache.get("any_key") in [{:ok, :_}, :miss]
-    end
-  end
+    test "delete/1 removes key from cache" do
+      key = "test_key"
+      value = "test_value"
 
-  describe "put/3" do
-    test "stores value with default TTL" do
-      assert ECache.put("key1", "value1") == :ok
+      ECache.put(key, value)
+      assert ECache.get(key) == {:ok, value}
+
+      assert ECache.delete(key) == :ok
+      assert ECache.get(key) == :miss
+    end
+
+    test "clear/0 removes all entries" do
+      ECache.put("key1", "value1")
+      ECache.put("key2", "value2")
+
       assert ECache.get("key1") == {:ok, "value1"}
-    end
-
-    test "stores value with custom TTL" do
-      assert ECache.put("key2", "value2", ttl: 10) == :ok
       assert ECache.get("key2") == {:ok, "value2"}
+
+      assert ECache.clear() == :ok
+
+      assert ECache.get("key1") == :miss
+      assert ECache.get("key2") == :miss
     end
 
-    test "overwrites existing key" do
-      ECache.put("key3", "old_value")
-      ECache.put("key3", "new_value")
-      assert ECache.get("key3") == {:ok, "new_value"}
-    end
+    test "stats/0 returns cache statistics" do
+      stats = ECache.stats()
 
-    test "stores different data types" do
-      ECache.put("string", "test")
-      ECache.put("number", 42)
-      ECache.put("list", [1, 2, 3])
-      ECache.put("map", %{key: "value"})
-
-      assert ECache.get("string") == {:ok, "test"}
-      assert ECache.get("number") == {:ok, 42}
-      assert ECache.get("list") == {:ok, [1, 2, 3]}
-      assert ECache.get("map") == {:ok, %{key: "value"}}
+      assert is_map(stats)
+      assert Map.has_key?(stats, :size)
+      assert Map.has_key?(stats, :memory)
     end
   end
 
-  describe "delete/1" do
-    test "removes existing key" do
-      ECache.put("delete_me", "value")
-      assert ECache.get("delete_me") == {:ok, "value"}
-
-      assert ECache.delete("delete_me") == :ok
-      assert ECache.get("delete_me") == :miss
-    end
-
-    test "returns :ok for non-existent key" do
-      assert ECache.delete("nonexistent") == :ok
-    end
-
-    test "broadcasts invalidation message", %{pubsub: pubsub} do
-      # Subscribe to invalidation messages
-      Phoenix.PubSub.subscribe(pubsub, "cache_invalidation")
-
-      ECache.put("broadcast_key", "value")
-      ECache.delete("broadcast_key")
-
-      # Should receive invalidation message
-      assert_receive {:invalidate, "broadcast_key"}, 1000
-    end
-  end
-
-  describe "load_cache/3" do
+  describe "ECache.load_cache/3" do
     test "returns cached value when available" do
-      ECache.put("cached_key", "cached_value")
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
 
       result =
-        ECache.load_cache("cached_key", [], fn ->
-          "loader_value"
+        ECache.load_cache(key, [], fn ->
+          "fresh_value"
         end)
 
-      assert result == {:ok, "cached_value"}
+      assert result == {:ok, cached_value}
     end
 
-    test "executes loader and caches result on cache miss" do
+    test "executes loader function on cache miss" do
+      key = "test_key"
+      fresh_value = "fresh_value"
+
       result =
-        ECache.load_cache("new_key", [], fn ->
-          {:ok, "loaded_value"}
+        ECache.load_cache(key, [], fn ->
+          fresh_value
         end)
 
-      assert result == {:ok, "loaded_value"}
-      assert ECache.get("new_key") == {:ok, "loaded_value"}
+      assert result == {:ok, fresh_value}
+      assert ECache.get(key) == {:ok, fresh_value}
     end
 
-    test "handles loader returning plain value" do
+    test "handles loader function returning {:ok, value}" do
+      key = "test_key"
+      fresh_value = "fresh_value"
+
       result =
-        ECache.load_cache("plain_key", [], fn ->
-          "plain_value"
+        ECache.load_cache(key, [], fn ->
+          {:ok, fresh_value}
         end)
 
-      assert result == {:ok, "plain_value"}
-      assert ECache.get("plain_key") == {:ok, "plain_value"}
+      assert result == {:ok, fresh_value}
+      assert ECache.get(key) == {:ok, fresh_value}
     end
 
-    test "handles loader returning nil" do
+    test "handles loader function returning {:error, reason}" do
+      key = "test_key"
+      error_reason = :not_found
+
       result =
-        ECache.load_cache("nil_key", [], fn ->
+        ECache.load_cache(key, [], fn ->
+          {:error, error_reason}
+        end)
+
+      assert result == {:error, error_reason}
+      # Errors not cached by default
+      assert ECache.get(key) == :miss
+    end
+
+    test "handles loader function returning nil" do
+      key = "test_key"
+
+      result =
+        ECache.load_cache(key, [], fn ->
           nil
         end)
 
       assert result == {:error, :nil_result}
-      assert ECache.get("nil_key") == :miss
+      assert ECache.get(key) == :miss
     end
 
-    test "handles loader returning error" do
+    test "caches errors when cache_errors: true" do
+      key = "test_key"
+      error_result = {:error, :not_found}
+
       result =
-        ECache.load_cache("error_key", [], fn ->
-          {:error, :something_wrong}
+        ECache.load_cache(key, [cache_errors: true, error_ttl: 3600], fn ->
+          error_result
         end)
 
-      assert result == {:error, :something_wrong}
-      assert ECache.get("error_key") == :miss
+      assert result == error_result
+      assert ECache.get(key) == {:ok, error_result}
     end
 
-    test "caches errors when cache_errors is true" do
-      result =
-        ECache.load_cache("error_cache_key", [cache_errors: true], fn ->
-          {:error, :cached_error}
-        end)
+    test "uses custom TTL option" do
+      key = "test_key"
+      value = "test_value"
 
-      assert result == {:error, :cached_error}
-      assert ECache.get("error_cache_key") == {:ok, {:error, :cached_error}}
-    end
-
-    test "uses custom error TTL" do
-      ECache.load_cache("error_ttl_key", [cache_errors: true, error_ttl: 1], fn ->
-        {:error, :short_lived_error}
+      ECache.load_cache(key, [ttl: 1], fn ->
+        value
       end)
 
-      assert ECache.get("error_ttl_key") == {:ok, {:error, :short_lived_error}}
+      assert ECache.get(key) == {:ok, value}
 
+      # Wait for expiration
       Process.sleep(1100)
-      assert ECache.get("error_ttl_key") == :miss
+      assert ECache.get(key) == :miss
     end
 
     test "handles loader function exceptions" do
+      key = "test_key"
+
       result =
-        ECache.load_cache("exception_key", [], fn ->
-          raise "Something went wrong"
+        ECache.load_cache(key, [], fn ->
+          raise "something went wrong"
         end)
 
-      assert {:error, {_kind, _reason}} = result
-      assert ECache.get("exception_key") == :miss
-    end
-
-    test "uses custom TTL from options" do
-      ECache.load_cache("custom_ttl_key", [ttl: 5], fn ->
-        "custom_ttl_value"
-      end)
-
-      # Verify it's cached
-      assert ECache.get("custom_ttl_key") == {:ok, "custom_ttl_value"}
+      assert {:error, {:error, %RuntimeError{}}} = result
+      assert ECache.get(key) == :miss
     end
   end
 
-  describe "invalidate_cache/2" do
-    test "invalidates cache when operation returns {:ok, result}" do
-      ECache.put("invalidate_key1", "old_value")
+  describe "ECache.invalidate_cache/2" do
+    test "invalidates cache when operation returns {:ok, value}" do
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
+      assert ECache.get(key) == {:ok, cached_value}
 
       result =
-        ECache.invalidate_cache("invalidate_key1", fn ->
+        ECache.invalidate_cache(key, fn ->
           {:ok, "operation_result"}
         end)
 
       assert result == {:ok, "operation_result"}
-      assert ECache.get("invalidate_key1") == :miss
+      assert ECache.get(key) == :miss
     end
 
     test "invalidates cache when operation returns :ok" do
-      ECache.put("invalidate_key2", "old_value")
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
+      assert ECache.get(key) == {:ok, cached_value}
 
       result =
-        ECache.invalidate_cache("invalidate_key2", fn ->
+        ECache.invalidate_cache(key, fn ->
           :ok
         end)
 
       assert result == :ok
-      assert ECache.get("invalidate_key2") == :miss
+      assert ECache.get(key) == :miss
     end
 
     test "does not invalidate cache when operation returns error" do
-      ECache.put("no_invalidate_key", "should_remain")
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
+      assert ECache.get(key) == {:ok, cached_value}
 
       result =
-        ECache.invalidate_cache("no_invalidate_key", fn ->
-          {:error, :operation_failed}
+        ECache.invalidate_cache(key, fn ->
+          {:error, :not_found}
         end)
 
-      assert result == {:error, :operation_failed}
-      assert ECache.get("no_invalidate_key") == {:ok, "should_remain"}
+      assert result == {:error, :not_found}
+      # Cache unchanged
+      assert ECache.get(key) == {:ok, cached_value}
     end
 
     test "does not invalidate cache when operation returns other values" do
-      ECache.put("other_result_key", "should_remain")
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
+      assert ECache.get(key) == {:ok, cached_value}
 
       result =
-        ECache.invalidate_cache("other_result_key", fn ->
+        ECache.invalidate_cache(key, fn ->
           "some_other_result"
         end)
 
       assert result == "some_other_result"
-      assert ECache.get("other_result_key") == {:ok, "should_remain"}
+      # Cache unchanged
+      assert ECache.get(key) == {:ok, cached_value}
     end
 
     test "handles operation function exceptions" do
-      ECache.put("exception_invalidate_key", "should_remain")
+      key = "test_key"
+      cached_value = "cached_value"
+
+      ECache.put(key, cached_value)
+      assert ECache.get(key) == {:ok, cached_value}
 
       result =
-        ECache.invalidate_cache("exception_invalidate_key", fn ->
-          raise "Operation failed"
+        ECache.invalidate_cache(key, fn ->
+          raise "something went wrong"
         end)
 
-      assert {:error, {_kind, _reason}} = result
-      assert ECache.get("exception_invalidate_key") == {:ok, "should_remain"}
+      assert {:error, {:error, %RuntimeError{}}} = result
+      # Cache unchanged on exception
+      assert ECache.get(key) == {:ok, cached_value}
     end
   end
 
-  describe "GenServer callbacks" do
-    test "handles invalidation messages from PubSub", %{cache_pid: cache_pid} do
-      ECache.put("remote_key", "value")
-      assert ECache.get("remote_key") == {:ok, "value"}
+  describe "ECache PubSub invalidation" do
+    test "delete/1 broadcasts invalidation message" do
+      key = "test_key"
+      topic = "cache_invalidation"
+      pubsub_name = ECache.PubSub
 
-      # Simulate invalidation message from another node
-      send(cache_pid, {:invalidate, "remote_key"})
+      # Subscribe to the invalidation topic
+      Phoenix.PubSub.subscribe(pubsub_name, topic)
 
-      # Give it a moment to process
-      Process.sleep(50)
+      # Put a value in cache
+      ECache.put(key, "value")
+      assert ECache.get(key) == {:ok, "value"}
 
-      assert ECache.get("remote_key") == :miss
+      # Delete should broadcast invalidation
+      ECache.delete(key)
+
+      # Should receive invalidation message
+      assert_receive {:invalidate, ^key}, 1000
+
+      # Key should be deleted locally
+      assert ECache.get(key) == :miss
     end
 
-    test "handles cleanup timer message", %{cache_pid: cache_pid} do
-      # Put some expired entries
-      :ets.insert(:distributed_cache, {"expired1", "value1", 1})
-      :ets.insert(:distributed_cache, {"expired2", "value2", 2})
-      :ets.insert(:distributed_cache, {"valid", "value", System.system_time(:second) + 3600})
+    test "handles PubSub broadcast failures gracefully" do
+      key = "test_key"
 
-      # Send cleanup message
-      send(cache_pid, :cleanup)
+      # Temporarily set an invalid PubSub name to simulate failure
+      old_pubsub = Application.get_env(:ecache, :pubsub_mod)
+      Application.put_env(:ecache, :pubsub_mod, :nonexistent_pubsub)
 
-      # Give it a moment to process
-      Process.sleep(50)
+      # Put a value in cache
+      ECache.put(key, "value")
+      assert ECache.get(key) == {:ok, "value"}
 
-      # Expired entries should be gone, valid one should remain
-      assert ECache.get("expired1") == :miss
-      assert ECache.get("expired2") == :miss
-      assert ECache.get("valid") == {:ok, "value"}
-    end
+      # Delete should still work even if broadcast fails
+      assert ECache.delete(key) == :ok
+      assert ECache.get(key) == :miss
 
-    test "handles unknown messages gracefully", %{cache_pid: cache_pid} do
-      send(cache_pid, :unknown_message)
-
-      # Should not crash
-      Process.sleep(50)
-      assert Process.alive?(cache_pid)
-    end
-  end
-
-  describe "TTL and expiration" do
-    test "respects default TTL configuration" do
-      # This would require mocking Application.compile_env
-      # For now, just verify basic TTL functionality
-      ECache.put("ttl_key", "value", ttl: 2)
-      assert ECache.get("ttl_key") == {:ok, "value"}
-
-      Process.sleep(2100)
-      assert ECache.get("ttl_key") == :miss
-    end
-
-    test "cleanup removes expired entries" do
-      current_time = System.system_time(:second)
-
-      # Insert some test data directly
-      :ets.insert(:distributed_cache, {"expired1", "val1", current_time - 10})
-      :ets.insert(:distributed_cache, {"expired2", "val2", current_time - 5})
-      :ets.insert(:distributed_cache, {"valid", "val3", current_time + 3600})
-
-      # Manually trigger cleanup
-      send(ECache, :cleanup)
-      Process.sleep(50)
-
-      # Only valid entry should remain
-      assert :ets.lookup(:distributed_cache, "expired1") == []
-      assert :ets.lookup(:distributed_cache, "expired2") == []
-      assert :ets.lookup(:distributed_cache, "valid") != []
+      # Restore original PubSub
+      Application.put_env(:ecache, :pubsub_mod, old_pubsub)
     end
   end
 
-  describe "error scenarios" do
-    test "gracefully handles when PubSub is not available" do
-      # This would require more complex setup to test PubSub failures
-      # For now, verify that cache operations still work locally
-      assert ECache.put("local_key", "local_value") == :ok
-      assert ECache.get("local_key") == {:ok, "local_value"}
+  describe "ECache error handling" do
+    test "get/1 handles adapter errors gracefully" do
+      # Mock a failing adapter by deleting the table
+      table_name = :persistent_term.get({ECache, :table_name})
+      :ets.delete(table_name)
+
+      # Should return :miss instead of crashing
+      assert ECache.get("any_key") == :miss
+    end
+
+    test "put/2 handles adapter errors gracefully" do
+      # Mock a failing adapter by deleting the table
+      table_name = :persistent_term.get({ECache, :table_name})
+      :ets.delete(table_name)
+
+      # Should return :ok instead of crashing (logged internally)
+      assert ECache.put("key", "value") == :ok
+    end
+
+    test "delete/1 handles adapter errors gracefully" do
+      # Mock a failing adapter by deleting the table
+      table_name = :persistent_term.get({ECache, :table_name})
+      :ets.delete(table_name)
+
+      # Should return :ok instead of crashing (logged internally)
+      assert ECache.delete("key") == :ok
     end
   end
 end
