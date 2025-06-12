@@ -517,7 +517,7 @@ defmodule ECache.Adapters.ETS do
   def cleanup_expired(table_name, current_time) do
     try do
       :ets.select_delete(table_name, [
-        {{:_, :_, :"$1"}, [{:<, :"$1", current_time}], [true]}
+        {{:_, :_, :"$1"}, [{:"=<", :"$1", current_time}], [true]}
       ])
 
       :ok
@@ -622,7 +622,7 @@ defmodule ECache.Adapters.Mnesia do
   @impl true
   def put(table_name, key, value, expires_at) do
     try do
-      :mnesia.dirty_write(table_name, {key, value, expires_at})
+      :mnesia.dirty_write(table_name, {table_name, key, value, expires_at})
       :ok
     catch
       kind, reason ->
