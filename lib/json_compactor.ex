@@ -155,10 +155,16 @@ defmodule JsonCompactor do
   """
   @spec decompact(compacted_array() | json_value()) :: json_value()
   def decompact([first | _rest] = array) when is_list(array) do
-    resolve_references(first, array)
+    if is_binary(first) do
+      first
+    else
+      resolve_references(first, array)
+    end
   end
 
-  def decompact(primitive_value), do: primitive_value
+  def decompact([]), do: raise(ArgumentError, "Cannot decompact empty list")
+
+  def decompact(_primitive_value), do: raise(ArgumentError, "Input must be a list")
 
   # Build lookup table using breadth-first search
   @spec build_lookup_table_bfs(json_value()) :: {String.t() | json_value(), map()}
@@ -292,13 +298,23 @@ defmodule JsonCompactor do
   defp needs_reference?(_), do: false
 
   # Resolve string references back to actual values
-  @spec resolve_references(json_value() | String.t(), list(json_value())) :: json_value()
+  @spec resolve_references(json_value() | String.t(), list(json_value())) ::
+          json_value()
+
   defp resolve_references(data, array) when is_binary(data) do
     case Integer.parse(data) do
       {index, ""} when index >= 0 and index < length(array) ->
-        array
-        |> Enum.at(index)
-        |> resolve_references(array)
+        value =
+          array
+          |> Enum.at(index)
+
+        # If the value is a string, return it directly because string at level 0 is already a string
+        if is_binary(value) do
+          value
+        else
+          # If the value is not a string, resolve it recursively
+          resolve_references(value, array)
+        end
 
       {index, ""} ->
         raise ArgumentError,
@@ -316,7 +332,9 @@ defmodule JsonCompactor do
   end
 
   defp resolve_references(data, array) when is_list(data) do
-    Enum.map(data, fn item -> resolve_references(item, array) end)
+    Enum.map(data, fn
+      item -> resolve_references(item, array)
+    end)
   end
 
   defp resolve_references(data, _array), do: data
