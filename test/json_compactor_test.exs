@@ -166,38 +166,25 @@ defmodule JsonCompactorTest do
 
   describe "decompact/1" do
     test "unwraps primitive values from single-item lists" do
-      assert JsonCompactor.decompact(["hello"]) == "hello"
-      assert JsonCompactor.decompact([42]) == 42
-      assert JsonCompactor.decompact([true]) == true
-      assert JsonCompactor.decompact([false]) == false
-      assert JsonCompactor.decompact([nil]) == nil
+      assert JsonCompactor.decompact(["hello"]) == {:ok, "hello"}
+      assert JsonCompactor.decompact([42]) == {:ok, 42}
+      assert JsonCompactor.decompact([true]) == {:ok, true}
+      assert JsonCompactor.decompact([false]) == {:ok, false}
+      assert JsonCompactor.decompact([nil]) == {:ok, nil}
     end
 
-    test "raises error for invalid input types" do
-      assert_raise ArgumentError, "Input must be a list", fn ->
-        JsonCompactor.decompact("not a list")
-      end
-
-      assert_raise ArgumentError, "Input must be a list", fn ->
-        JsonCompactor.decompact(42)
-      end
+    test "returns error for invalid input types" do
+      assert JsonCompactor.decompact("not a list") == {:error, "Input must be a list"}
+      assert JsonCompactor.decompact(42) == {:error, "Input must be a list"}
     end
 
-    test "raises error for empty list" do
-      assert_raise ArgumentError, "Cannot decompact empty list", fn ->
-        JsonCompactor.decompact([])
-      end
+    test "returns error for empty list" do
+      assert JsonCompactor.decompact([]) == {:error, "Cannot decompact empty list"}
     end
-
-    # test "raises error for invalid references in single-item array" do
-    #   assert_raise ArgumentError, "Invalid reference in single-item array", fn ->
-    #     JsonCompactor.decompact(["0"])
-    #   end
-    # end
 
     test "decompacts simple structures" do
       compacted = [%{"name" => "1"}, "Alice"]
-      result = JsonCompactor.decompact(compacted)
+      {:ok, result} = JsonCompactor.decompact(compacted)
 
       assert result == %{"name" => "Alice"}
     end
@@ -210,7 +197,7 @@ defmodule JsonCompactorTest do
         "Alice"
       ]
 
-      result = JsonCompactor.decompact(compacted)
+      {:ok, result} = JsonCompactor.decompact(compacted)
       expected = %{"user" => %{"profile" => %{"name" => "Alice"}}}
 
       assert result == expected
@@ -218,7 +205,7 @@ defmodule JsonCompactorTest do
 
     test "handles list decompaction" do
       compacted = [["1", "2", "3"], "first", "second", "third"]
-      result = JsonCompactor.decompact(compacted)
+      {:ok, result} = JsonCompactor.decompact(compacted)
 
       assert result == ["first", "second", "third"]
     end
@@ -230,7 +217,7 @@ defmodule JsonCompactorTest do
         "Alice"
       ]
 
-      result = JsonCompactor.decompact(compacted)
+      {:ok, result} = JsonCompactor.decompact(compacted)
 
       expected = %{
         "user1" => %{"name" => "Alice"},
@@ -240,16 +227,15 @@ defmodule JsonCompactorTest do
       assert result == expected
     end
 
-    test "raises error for invalid references" do
+    test "returns error for invalid references" do
       compacted = [%{"invalid" => "99"}, "valid"]
 
-      assert_raise ArgumentError, ~r/Reference index 99 is out of bounds/, fn ->
-        JsonCompactor.decompact(compacted)
-      end
+      assert JsonCompactor.decompact(compacted) ==
+               {:error, "Reference index 99 is out of bounds for array of length 2"}
     end
 
-    test "handles circular references in compacted data" do
-      # This tests that the decompact can handle self-referential structures
+    test "detects circular references in compacted data" do
+      # This tests that the decompact can detect self-referential structures
       # that might occur in the compacted format
       compacted = [
         # References itself
@@ -257,11 +243,9 @@ defmodule JsonCompactorTest do
         "other_value"
       ]
 
-      # This should work without infinite recursion
-      # though the result will be a self-referential structure
-      result = JsonCompactor.decompact(compacted)
-      assert is_map(result)
-      assert Map.has_key?(result, "self")
+      # This should detect the circular reference and return an error
+      assert JsonCompactor.decompact(compacted) ==
+               {:error, "Circular reference detected at index 0"}
     end
   end
 
@@ -271,7 +255,7 @@ defmodule JsonCompactorTest do
 
       Enum.each(primitives, fn original ->
         compacted = JsonCompactor.compact(original)
-        restored = JsonCompactor.decompact(compacted)
+        {:ok, restored} = JsonCompactor.decompact(compacted)
         assert restored == original
       end)
     end
@@ -280,7 +264,7 @@ defmodule JsonCompactorTest do
       original = %{"name" => "Alice", "age" => 30}
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -295,7 +279,7 @@ defmodule JsonCompactorTest do
       }
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -309,7 +293,7 @@ defmodule JsonCompactorTest do
       ]
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -335,7 +319,7 @@ defmodule JsonCompactorTest do
       }
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -356,7 +340,7 @@ defmodule JsonCompactorTest do
       }
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -366,12 +350,12 @@ defmodule JsonCompactorTest do
       original_list = []
 
       compacted_map = JsonCompactor.compact(original_map)
-      restored_map = JsonCompactor.decompact(compacted_map)
+      {:ok, restored_map} = JsonCompactor.decompact(compacted_map)
       assert restored_map == original_map
       assert compacted_map == [%{}]
 
       compacted_list = JsonCompactor.compact(original_list)
-      restored_list = JsonCompactor.decompact(compacted_list)
+      {:ok, restored_list} = JsonCompactor.decompact(compacted_list)
       assert restored_list == original_list
       assert compacted_list == [[]]
     end
@@ -386,7 +370,7 @@ defmodule JsonCompactorTest do
       }
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
     end
@@ -401,7 +385,7 @@ defmodule JsonCompactorTest do
       original = %{"items" => large_list}
 
       compacted = JsonCompactor.compact(original)
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
 
@@ -420,7 +404,7 @@ defmodule JsonCompactorTest do
 
       compacted = JsonCompactor.compact(original)
       IO.inspect(compacted, label: "Compacted Result")
-      restored = JsonCompactor.decompact(compacted)
+      {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original
       # Ensure types are preserved

@@ -124,47 +124,52 @@ defmodule JsonCompactor do
 
   Takes a compacted array (as returned by `compact/1`) and reconstructs the original
   nested structure by resolving all string reference indices back to their actual values.
-  If the input is not a list, it's returned as-is (primitive values).
 
   ## Parameters
 
   - `compacted_data` - Either:
     - A list where the first element is the root structure and remaining elements are referenced structures
-    - A primitive value (returned unchanged)
+    - A primitive value (returns error)
 
   ## Returns
 
-  The original nested data structure with all references resolved.
+  - `{:ok, data}` - The original nested data structure with all references resolved
+  - `{:error, message}` - Error message if decompaction fails
 
   ## Examples
 
       iex> JsonCompactor.decompact("hello")
-      "hello"
+      {:error, "Input must be a list"}
 
-      iex> JsonCompactor.decompact(42)
-      42
+      iex> JsonCompactor.decompact([])
+      {:error, "Cannot decompact empty list"}
 
       iex> compacted = [%{"nested" => "1"}, %{"inner" => "2"}, "value"]
       iex> JsonCompactor.decompact(compacted)
-      %{"nested" => %{"inner" => "value"}}
+      {:ok, %{"nested" => %{"inner" => "value"}}}
 
-  ## Raises
+  ## Errors
 
-  - `ArgumentError` if reference indices are out of bounds
+  - Reference indices are out of bounds
+  - Circular references detected
+  - Invalid input (not a list or empty list)
 
   """
-  @spec decompact(compacted_array() | json_value()) :: json_value()
+  @spec decompact(compacted_array() | json_value()) :: {:ok, json_value()} | {:error, String.t()}
   def decompact([first | _rest] = array) when is_list(array) do
     if is_binary(first) do
-      first
+      {:ok, first}
     else
-      resolve_references(first, array)
+      case resolve_references(first, array, MapSet.new()) do
+        {:ok, result} -> {:ok, result}
+        {:error, message} -> {:error, message}
+      end
     end
   end
 
-  def decompact([]), do: raise(ArgumentError, "Cannot decompact empty list")
+  def decompact([]), do: {:error, "Cannot decompact empty list"}
 
-  def decompact(_primitive_value), do: raise(ArgumentError, "Input must be a list")
+  def decompact(_primitive_value), do: {:error, "Input must be a list"}
 
   # Build lookup table using breadth-first search
   @spec build_lookup_table_bfs(json_value()) :: {String.t() | json_value(), map()}
@@ -297,45 +302,63 @@ defmodule JsonCompactor do
   defp needs_reference?(value) when is_binary(value), do: true
   defp needs_reference?(_), do: false
 
-  # Resolve string references back to actual values
-  @spec resolve_references(json_value() | String.t(), list(json_value())) ::
-          json_value()
+  # Resolve string references back to actual values with cycle detection
+  @spec resolve_references(json_value() | String.t(), list(json_value()), MapSet.t()) ::
+          {:ok, json_value()} | {:error, String.t()}
 
-  defp resolve_references(data, array) when is_binary(data) do
+  defp resolve_references(data, array, visited) when is_binary(data) do
     case Integer.parse(data) do
       {index, ""} when index >= 0 and index < length(array) ->
-        value =
-          array
-          |> Enum.at(index)
-
-        # If the value is a string, return it directly because string at level 0 is already a string
-        if is_binary(value) do
-          value
+        # Check for circular reference
+        if MapSet.member?(visited, index) do
+          {:error, "Circular reference detected at index #{index}"}
         else
-          # If the value is not a string, resolve it recursively
-          resolve_references(value, array)
+          value = Enum.at(array, index)
+          new_visited = MapSet.put(visited, index)
+
+          # If the value is a string, return it directly because string at level 0 is already a string
+          if is_binary(value) do
+            {:ok, value}
+          else
+            # If the value is not a string, resolve it recursively
+            resolve_references(value, array, new_visited)
+          end
         end
 
       {index, ""} ->
-        raise ArgumentError,
-              "Reference index #{index} is out of bounds for array of length #{length(array)}"
+        {:error, "Reference index #{index} is out of bounds for array of length #{length(array)}"}
 
       _ ->
-        data
+        {:ok, data}
     end
   end
 
-  defp resolve_references(data, array) when is_map(data) do
-    data
-    |> Enum.map(fn {key, value} -> {key, resolve_references(value, array)} end)
-    |> Enum.into(%{})
+  defp resolve_references(data, array, visited) when is_map(data) do
+    result = 
+      Enum.reduce_while(data, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+        case resolve_references(value, array, visited) do
+          {:ok, resolved_value} -> {:cont, {:ok, Map.put(acc, key, resolved_value)}}
+          {:error, message} -> {:halt, {:error, message}}
+        end
+      end)
+    
+    result
   end
 
-  defp resolve_references(data, array) when is_list(data) do
-    Enum.map(data, fn
-      item -> resolve_references(item, array)
-    end)
+  defp resolve_references(data, array, visited) when is_list(data) do
+    result = 
+      Enum.reduce_while(data, {:ok, []}, fn item, {:ok, acc} ->
+        case resolve_references(item, array, visited) do
+          {:ok, resolved_item} -> {:cont, {:ok, [resolved_item | acc]}}
+          {:error, message} -> {:halt, {:error, message}}
+        end
+      end)
+    
+    case result do
+      {:ok, reversed_list} -> {:ok, Enum.reverse(reversed_list)}
+      {:error, message} -> {:error, message}
+    end
   end
 
-  defp resolve_references(data, _array), do: data
+  defp resolve_references(data, _array, _visited), do: {:ok, data}
 end
