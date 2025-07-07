@@ -160,7 +160,9 @@ defmodule JsonCompactor do
     if is_binary(first) do
       {:ok, first}
     else
-      case resolve_references(first, array, MapSet.new()) do
+      # Build index map for O(1) access
+      index_map = build_index_map(array)
+      case resolve_references(first, index_map, MapSet.new()) do
         {:ok, result} -> {:ok, result}
         {:error, message} -> {:error, message}
       end
@@ -302,41 +304,44 @@ defmodule JsonCompactor do
   defp needs_reference?(value) when is_binary(value), do: true
   defp needs_reference?(_), do: false
 
+  # Build index map for O(1) access to array elements
+  @spec build_index_map(list(json_value())) :: map()
+  defp build_index_map(array) do
+    array
+    |> Enum.with_index()
+    |> Enum.into(%{}, fn {value, index} -> {Integer.to_string(index), value} end)
+  end
+
   # Resolve string references back to actual values with cycle detection
-  @spec resolve_references(json_value() | String.t(), list(json_value()), MapSet.t()) ::
+  @spec resolve_references(json_value() | String.t(), map(), MapSet.t()) ::
           {:ok, json_value()} | {:error, String.t()}
 
-  defp resolve_references(data, array, visited) when is_binary(data) do
-    case Integer.parse(data) do
-      {index, ""} when index >= 0 and index < length(array) ->
+  defp resolve_references(data, index_map, visited) when is_binary(data) do
+    case Map.fetch(index_map, data) do
+      {:ok, value} ->
         # Check for circular reference
-        if MapSet.member?(visited, index) do
-          {:error, "Circular reference detected at index #{index}"}
+        if MapSet.member?(visited, data) do
+          {:error, "Circular reference detected at index #{data}"}
         else
-          value = Enum.at(array, index)
-          new_visited = MapSet.put(visited, index)
+          new_visited = MapSet.put(visited, data)
 
           # If the value is a string, return it directly because string at level 0 is already a string
           if is_binary(value) do
             {:ok, value}
           else
             # If the value is not a string, resolve it recursively
-            resolve_references(value, array, new_visited)
+            resolve_references(value, index_map, new_visited)
           end
         end
-
-      {index, ""} ->
-        {:error, "Reference index #{index} is out of bounds for array of length #{length(array)}"}
-
-      _ ->
-        {:ok, data}
+      :error ->
+        {:error, "Reference index #{data} is out of bounds for array of length #{map_size(index_map)}"}
     end
   end
 
-  defp resolve_references(data, array, visited) when is_map(data) do
+  defp resolve_references(data, index_map, visited) when is_map(data) do
     result = 
       Enum.reduce_while(data, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-        case resolve_references(value, array, visited) do
+        case resolve_references(value, index_map, visited) do
           {:ok, resolved_value} -> {:cont, {:ok, Map.put(acc, key, resolved_value)}}
           {:error, message} -> {:halt, {:error, message}}
         end
@@ -345,10 +350,10 @@ defmodule JsonCompactor do
     result
   end
 
-  defp resolve_references(data, array, visited) when is_list(data) do
+  defp resolve_references(data, index_map, visited) when is_list(data) do
     result = 
       Enum.reduce_while(data, {:ok, []}, fn item, {:ok, acc} ->
-        case resolve_references(item, array, visited) do
+        case resolve_references(item, index_map, visited) do
           {:ok, resolved_item} -> {:cont, {:ok, [resolved_item | acc]}}
           {:error, message} -> {:halt, {:error, message}}
         end
@@ -360,5 +365,5 @@ defmodule JsonCompactor do
     end
   end
 
-  defp resolve_references(data, _array, _visited), do: {:ok, data}
+  defp resolve_references(data, _index_map, _visited), do: {:ok, data}
 end

@@ -100,7 +100,6 @@ defmodule JsonCompactorTest do
 
       # Should deduplicate the shared map and strings
       assert is_list(result)
-      IO.inspect(result, label: "Compacted Result")
 
       # Find the root map
       root = Enum.at(result, 0)
@@ -403,7 +402,6 @@ defmodule JsonCompactorTest do
       }
 
       compacted = JsonCompactor.compact(original)
-      IO.inspect(compacted, label: "Compacted Result")
       {:ok, restored} = JsonCompactor.decompact(compacted)
 
       assert restored == original

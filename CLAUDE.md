@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Elixir library called "Useful" that provides a collection of helper modules for common development patterns. The library contains 12 main utility modules that can be copied and added to other projects.
+This is an Elixir library called "Useful" that provides a collection of helper modules for common development patterns. The library contains 13 main utility modules that can be copied and added to other projects.
 
 ## Architecture
 
@@ -29,6 +29,7 @@ The project follows standard Elixir library conventions:
 - **Filter**: Dynamic query building from conditions
 - **Nested**: Utilities for working with nested collections
 - **PingEndpoint**: Simple health check endpoint
+- **JsonCompactor**: Data structure optimization tool that compacts JSON-like structures by flattening nested maps, lists, and strings into arrays with reference indices for memory efficiency and deduplication
 
 ## Development Commands
 
