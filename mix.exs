@@ -30,7 +30,8 @@ defmodule Useful.MixProject do
       {:skema, "~> 0.2.2"},
       {:redix, "~> 1.5"},
       {:phoenix_pubsub, "~> 2.1"},
-      {:phoenix_pubsub_redis, "~> 3.0"}
+      {:phoenix_pubsub_redis, "~> 3.0"},
+      {:benchee, "~> 1.0", only: :dev}
     ]
   end
 end

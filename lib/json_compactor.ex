@@ -187,6 +187,30 @@ defmodule JsonCompactor do
     {Integer.to_string(root_index), final_lookup}
   end
 
+  # Helper function to add children to queue with batch processing
+  @spec add_children_to_queue(json_value(), :queue.queue()) :: :queue.queue()
+  defp add_children_to_queue(value, queue) do
+    case value do
+      map when is_map(map) ->
+        children = Map.values(map)
+        add_children_batch(children, queue)
+
+      list when is_list(list) ->
+        add_children_batch(list, queue)
+
+      _primitive ->
+        # Strings and other primitives don't have children
+        queue
+    end
+  end
+
+  # Batch add children to queue for better performance
+  @spec add_children_batch([json_value()], :queue.queue()) :: :queue.queue()
+  defp add_children_batch([], queue), do: queue
+  defp add_children_batch([child | rest], queue) do
+    add_children_batch(rest, :queue.in(child, queue))
+  end
+
   # Phase 1: BFS traversal to collect values that need references (maps, lists, strings)
   @spec bfs_collect_values(:queue.queue(), map(), non_neg_integer()) :: {map(), non_neg_integer()}
   defp bfs_collect_values(queue, value_to_index, counter) do
@@ -202,43 +226,12 @@ defmodule JsonCompactor do
                 new_counter = counter + 1
 
                 # Add children to queue
-                children_queue =
-                  case value do
-                    map when is_map(map) ->
-                      Enum.reduce(Map.values(map), remaining_queue, fn child, acc_queue ->
-                        :queue.in(child, acc_queue)
-                      end)
-
-                    list when is_list(list) ->
-                      Enum.reduce(list, remaining_queue, fn child, acc_queue ->
-                        :queue.in(child, acc_queue)
-                      end)
-
-                    _string ->
-                      # Strings don't have children
-                      remaining_queue
-                  end
-
+                children_queue = add_children_to_queue(value, remaining_queue)
                 bfs_collect_values(children_queue, updated_index_map, new_counter)
 
               false ->
                 # For non-reference values (numbers, booleans, etc.), still traverse children
-                children_queue =
-                  case value do
-                    map when is_map(map) ->
-                      Enum.reduce(Map.values(map), remaining_queue, fn child, acc_queue ->
-                        :queue.in(child, acc_queue)
-                      end)
-
-                    list when is_list(list) ->
-                      Enum.reduce(list, remaining_queue, fn child, acc_queue ->
-                        :queue.in(child, acc_queue)
-                      end)
-
-                    _primitive ->
-                      remaining_queue
-                  end
-
+                children_queue = add_children_to_queue(value, remaining_queue)
                 bfs_collect_values(children_queue, value_to_index, counter)
             end
 
@@ -255,6 +248,10 @@ defmodule JsonCompactor do
   # Phase 2: Build compacted versions of complex structures
   @spec build_compacted_structures(map()) :: map()
   defp build_compacted_structures(value_to_index) do
+    # Pre-compute string indices to avoid repeated conversions
+    string_indices = 
+      Enum.into(value_to_index, %{}, fn {value, index} -> {value, Integer.to_string(index)} end)
+    
     Enum.reduce(value_to_index, %{}, fn {value, index}, acc ->
       compacted_value =
         case value do
@@ -262,8 +259,8 @@ defmodule JsonCompactor do
             Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
               case needs_reference?(child_value) do
                 true ->
-                  child_index = Map.get(value_to_index, child_value)
-                  Map.put(acc_map, key, Integer.to_string(child_index))
+                  child_index_str = Map.get(string_indices, child_value)
+                  Map.put(acc_map, key, child_index_str)
 
                 false ->
                   Map.put(acc_map, key, child_value)
@@ -274,8 +271,7 @@ defmodule JsonCompactor do
             Enum.map(list, fn child_value ->
               case needs_reference?(child_value) do
                 true ->
-                  child_index = Map.get(value_to_index, child_value)
-                  Integer.to_string(child_index)
+                  Map.get(string_indices, child_value)
 
                 false ->
                   child_value
@@ -351,19 +347,23 @@ defmodule JsonCompactor do
   end
 
   defp resolve_references(data, index_map, visited) when is_list(data) do
-    result = 
-      Enum.reduce_while(data, {:ok, []}, fn item, {:ok, acc} ->
-        case resolve_references(item, index_map, visited) do
-          {:ok, resolved_item} -> {:cont, {:ok, [resolved_item | acc]}}
-          {:error, message} -> {:halt, {:error, message}}
-        end
-      end)
-    
-    case result do
-      {:ok, reversed_list} -> {:ok, Enum.reverse(reversed_list)}
-      {:error, message} -> {:error, message}
-    end
+    resolve_list_items(data, index_map, visited, [])
   end
 
   defp resolve_references(data, _index_map, _visited), do: {:ok, data}
+
+  # Helper function to resolve list items without reversing
+  @spec resolve_list_items([json_value()], map(), MapSet.t(), [json_value()]) :: {:ok, [json_value()]} | {:error, String.t()}
+  defp resolve_list_items([], _index_map, _visited, acc) do
+    {:ok, :lists.reverse(acc)}
+  end
+
+  defp resolve_list_items([item | rest], index_map, visited, acc) do
+    case resolve_references(item, index_map, visited) do
+      {:ok, resolved_item} ->
+        resolve_list_items(rest, index_map, visited, [resolved_item | acc])
+      {:error, message} ->
+        {:error, message}
+    end
+  end
 end
