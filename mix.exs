@@ -7,7 +7,14 @@ defmodule Useful.MixProject do
       version: "0.1.0",
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      test_coverage: [tool: ExCoveralls],
+      preferred_cli_env: [
+        coveralls: :test,
+        "coveralls.detail": :test,
+        "coveralls.post": :test,
+        "coveralls.html": :test
+      ]
     ]
   end
 
@@ -31,7 +38,8 @@ defmodule Useful.MixProject do
       {:redix, "~> 1.5"},
       {:phoenix_pubsub, "~> 2.1"},
       {:phoenix_pubsub_redis, "~> 3.0"},
-      {:benchee, "~> 1.0", only: :dev}
+      {:benchee, "~> 1.0", only: :dev},
+      {:excoveralls, "~> 0.16", only: :test}
     ]
   end
 end
