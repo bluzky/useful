@@ -1,18 +1,62 @@
 defmodule DefEnum do
   @moduledoc """
-  This module provides a macro to define an enum.
+  A macro-based utility for defining typed enums with Ecto integration.
 
-  ## Example
+  Provides a clean DSL for creating enums that automatically implement Ecto.Type
+  behavior for seamless database operations, along with helper functions for
+  value validation and retrieval.
 
-      defmodule MyEnum do
+  ## Features
+
+  - Clean DSL for enum definition using `value/2` macro
+  - Automatic Ecto.Type implementation with configurable storage type
+  - Generated helper functions for each enum value
+  - Validation of input values (supports both atoms and strings)
+  - Flexible usage: inline or as separate modules
+
+  ## Basic Usage
+
+      defmodule Status do
         use DefEnum
 
         enum do
-          value(:value1, "value1")
-          value(:value2, "value2")
-          value(:value3, "value3")
+          value(:active, "active")
+          value(:inactive, "inactive")
+          value(:pending)  # defaults to "pending"
         end
       end
+
+      # Generated functions
+      Status.active()    # => "active"
+      Status.values()    # => ["active", "inactive", "pending", :active, :inactive, :pending]
+
+  ## Ecto Integration
+
+      defmodule User do
+        use Ecto.Schema
+
+        schema "users" do
+          field :status, Status  # Uses the enum as Ecto type
+        end
+      end
+
+      # Casting works with atoms or strings
+      Status.cast(:active)     # => {:ok, "active"}
+      Status.cast("inactive")  # => {:ok, "inactive"}
+      Status.cast("invalid")   # => :error
+
+  ## Module Definition
+
+      # Define enum as separate module
+      enum module: UserRole do
+        value(:admin, "admin")
+        value(:user, "user")
+      end
+
+  ## Configuration Options
+
+  - `:type` - Database storage type (default: `:string`)
+  - `:module` - Define enum in separate module (default: `nil`)
   """
   @accumulating_attrs [
     :enum_values

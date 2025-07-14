@@ -63,6 +63,15 @@ mix compile
 mix deps.get
 ```
 
+### Benchmarking
+```bash
+# Run benchmarks (located in bench/ directory)
+mix run bench/json_compactor_bench.exs
+
+# Run quick benchmarks
+mix run bench/json_compactor_quick_bench.exs
+```
+
 ### Dependencies
 The project uses these main dependencies:
 - `ecto` for database abstractions
