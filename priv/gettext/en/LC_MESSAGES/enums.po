@@ -1,0 +1,27 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: test/support/test_enums.ex:21
+#, elixir-autogen, elixir-format
+msgid "status.waiting"
+msgstr "Waiting"
+
+#: test/support/test_enums.ex:19
+#, elixir-autogen, elixir-format
+msgid "user_status.active"
+msgstr "Active"
+
+#: test/support/test_enums.ex:20
+#, elixir-autogen, elixir-format
+msgid "user_status.inactive"
+msgstr "Inactive"
