@@ -44,7 +44,15 @@ defmodule JsonCompactor do
   """
 
   @type json_value ::
-          nil | boolean() | number() | String.t() | [json_value()] | %{String.t() => json_value()}
+          nil
+          | boolean()
+          | number()
+          | String.t()
+          | [json_value()]
+          | %{String.t() => json_value()}
+          | %{atom() => json_value()}
+          | struct()
+          | tuple()
   @type compacted_array :: [json_value() | String.t()]
 
   @doc """
@@ -191,11 +199,18 @@ defmodule JsonCompactor do
   defp add_children_to_queue(value, queue) do
     case value do
       map when is_map(map) ->
-        children = Map.values(map)
+        children =
+          map
+          |> Map.delete(:__struct__)
+          |> Map.values()
+
         add_children_batch(children, queue)
 
       list when is_list(list) ->
         add_children_batch(list, queue)
+
+      tuple when is_tuple(tuple) ->
+        add_children_batch(Tuple.to_list(tuple), queue)
 
       _primitive ->
         # Strings and other primitives don't have children
@@ -205,10 +220,8 @@ defmodule JsonCompactor do
 
   # Batch add children to queue for better performance
   @spec add_children_batch([json_value()], :queue.queue()) :: :queue.queue()
-  defp add_children_batch([], queue), do: queue
-
-  defp add_children_batch([child | rest], queue) do
-    add_children_batch(rest, :queue.in(child, queue))
+  defp add_children_batch(children, queue) do
+    Enum.reduce(children, queue, &:queue.in/2)
   end
 
   # Phase 1: BFS traversal to collect values that need references (maps, lists, strings)
@@ -243,72 +256,113 @@ defmodule JsonCompactor do
     end
   end
 
-  # Phase 2: Build compacted versions of complex structures
+  # Phase 2: Build compacted versions of complex structures in single pass
   @spec build_compacted_structures(map()) :: map()
   defp build_compacted_structures(value_to_index) do
-    # Pre-compute string indices to avoid repeated conversions
-    string_indices =
-      Map.new(value_to_index, fn {value, index} -> {value, Integer.to_string(index)} end)
+    # Pre-compute all string indices once
+    string_indices = Map.new(value_to_index, fn {value, index} -> {value, to_string(index)} end)
+    
+    # Single pass to build compacted structures
+    Map.new(value_to_index, fn {value, index} ->
+      compacted_value = compact_value(value, string_indices)
+      {compacted_value, index}
+    end)
+  end
 
-    Enum.reduce(value_to_index, %{}, fn {value, index}, acc ->
-      compacted_value =
-        case value do
-          %struct{} when struct in [Date, DateTime, NaiveDateTime, Time] ->
-            # Keep date/time values as is
-            value
+  # Compact a single value based on its type
+  @spec compact_value(json_value(), map()) :: json_value()
+  defp compact_value(data, string_indices) when is_struct(data) do
+    # For other structs, preserve type info and convert atom keys
+    map = Map.from_struct(data)
+    struct_name = to_string(data.__struct__)
 
-          data when is_struct(data) ->
-            # For other structs, convert to map
-            map = Map.from_struct(data)
+    # Convert atom keys to ":atomname" and add struct marker
+    converted_map =
+      Map.new(map, fn {key, value} ->
+        # Struct fields are always atoms
+        key_str = ":" <> Atom.to_string(key)
+        {key_str, value}
+      end)
 
-            Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
-              if needs_reference?(child_value) do
-                child_index_str = Map.get(string_indices, child_value)
-                Map.put(acc_map, key, child_index_str)
-              else
-                Map.put(acc_map, key, child_value)
-              end
-            end)
+    base_map =
+      Map.put(converted_map, "__struct__", struct_name)
 
-          map when is_map(map) ->
-            Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
-              if needs_reference?(child_value) do
-                child_index_str = Map.get(string_indices, child_value)
-                Map.put(acc_map, key, child_index_str)
-              else
-                Map.put(acc_map, key, child_value)
-              end
-            end)
+    # Apply reference resolution
+    resolve_map_references(base_map, string_indices, fn key ->
+      # Keep struct name as-is
+      key == "__struct__"
+    end)
+  end
 
-          list when is_list(list) ->
-            Enum.map(list, fn child_value ->
-              if needs_reference?(child_value) do
-                Map.get(string_indices, child_value)
-              else
-                child_value
-              end
-            end)
+  defp compact_value(map, string_indices) when is_map(map) do
+    # Convert atom keys to ":atomname" format and apply reference resolution
+    converted_map =
+      Map.new(map, fn {key, value} ->
+        # Convert key inline
+        new_key = if is_atom(key), do: ":" <> Atom.to_string(key), else: key
+        {new_key, value}
+      end)
 
-          primitive ->
-            primitive
+    resolve_map_references(converted_map, string_indices, fn _key -> false end)
+  end
+
+  defp compact_value(list, string_indices) when is_list(list) do
+    # Compact list with reference resolution
+    Enum.map(list, fn child_value ->
+      if needs_reference?(child_value) do
+        Map.get(string_indices, child_value)
+      else
+        child_value
+      end
+    end)
+  end
+
+  defp compact_value(tuple, string_indices) when is_tuple(tuple) do
+    # Convert tuple to list with special marker for JSON compatibility
+    tuple_list = ["__tuple__" | Tuple.to_list(tuple)]
+
+    compact_value(tuple_list, string_indices)
+  end
+
+  defp compact_value(primitive, _string_indices) do
+    primitive
+  end
+
+  # Apply reference resolution to map values with optional key preservation
+  @spec resolve_map_references(map(), map(), (String.t() -> boolean())) :: map()
+  defp resolve_map_references(map, string_indices, preserve_key_fn) do
+    Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
+      if preserve_key_fn.(key) do
+        # Keep value as-is
+        Map.put(acc_map, key, child_value)
+      else
+        if needs_reference?(child_value) do
+          child_index_str = Map.get(string_indices, child_value)
+          Map.put(acc_map, key, child_index_str)
+        else
+          Map.put(acc_map, key, child_value)
         end
-
-      Map.put(acc, compacted_value, index)
+      end
     end)
   end
 
   # Check if a value needs to be compacted (stored in reference table)
-  @spec needs_compaction_reference?(json_value()) :: boolean()
   defp needs_compaction_reference?(value) when is_map(value) and map_size(value) > 0, do: true
   defp needs_compaction_reference?(value) when is_list(value) and length(value) > 0, do: true
+  defp needs_compaction_reference?(value) when is_tuple(value), do: true
   defp needs_compaction_reference?(value) when is_binary(value), do: true
-  defp needs_compaction_reference?(value) when is_atom(value) and value not in [nil, true, false], do: true
+
+  defp needs_compaction_reference?(value) when is_atom(value) and value not in [nil, true, false],
+    do: true
+
   defp needs_compaction_reference?(_), do: false
 
   # Check if a value needs to be referenced (maps, lists, strings)
   @spec needs_reference?(json_value()) :: boolean()
+  defp needs_reference?("__tuple__"), do: false
   defp needs_reference?(value) when is_map(value), do: true
   defp needs_reference?(value) when is_list(value), do: true
+  defp needs_reference?(value) when is_tuple(value), do: true
   defp needs_reference?(value) when is_binary(value), do: true
   defp needs_reference?(value) when is_atom(value) and value not in [nil, true, false], do: true
   defp needs_reference?(_), do: false
@@ -318,7 +372,21 @@ defmodule JsonCompactor do
   defp build_index_map(array) do
     array
     |> Enum.with_index()
-    |> Map.new(fn {value, index} -> {Integer.to_string(index), value} end)
+    |> Map.new(fn
+      # Handle struct module names that were serialized as strings during compaction.
+      # These are safe to convert back to atoms since they came from existing structs.
+      {"Elixir." <> _module_suffix = struct_name, index} when is_binary(struct_name) ->
+        try do
+          {to_string(index), String.to_existing_atom(struct_name)}
+        rescue
+          ArgumentError ->
+            # If atom doesn't exist, treat as regular string (safety fallback)
+            {to_string(index), struct_name}
+        end
+
+      {value, index} ->
+        {to_string(index), value}
+    end)
   end
 
   # Resolve string references back to actual values with cycle detection
@@ -350,15 +418,58 @@ defmodule JsonCompactor do
   end
 
   defp resolve_references(data, index_map, visited) when is_map(data) do
+    # First resolve all references and convert keys in one pass
     result =
-      Enum.reduce_while(data, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-        case resolve_references(value, index_map, visited) do
-          {:ok, resolved_value} -> {:cont, {:ok, Map.put(acc, key, resolved_value)}}
-          {:error, message} -> {:halt, {:error, message}}
-        end
+      Enum.reduce_while(data, {:ok, %{}}, fn
+        {"__struct__" = key, value}, {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, key, value)}}
+
+        {key, value}, {:ok, acc} ->
+          case resolve_references(value, index_map, visited) do
+            {:ok, resolved_value} ->
+              # Convert key inline
+              new_key =
+                case key do
+                  ":" <> atom_name ->
+                    try do
+                      String.to_existing_atom(atom_name)
+                    rescue
+                      # Keep as string if atom doesn't exist
+                      ArgumentError -> key
+                    end
+
+                  _ ->
+                    # Regular string key
+                    key
+                end
+
+              {:cont, {:ok, Map.put(acc, new_key, resolved_value)}}
+
+            {:error, message} ->
+              {:halt, {:error, message}}
+          end
       end)
 
-    result
+    case result do
+      {:ok, resolved_map} ->
+        # Check for struct reconstruction
+        if Map.has_key?(resolved_map, "__struct__") do
+          {:ok, reconstruct_struct(resolved_map)}
+        else
+          {:ok, resolved_map}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp resolve_references(["__tuple__" | elements], index_map, visited) do
+    # Handle tuple reconstruction
+    case resolve_list_items(elements, index_map, visited, []) do
+      {:ok, resolved_elements} -> {:ok, List.to_tuple(resolved_elements)}
+      error -> error
+    end
   end
 
   defp resolve_references(data, index_map, visited) when is_list(data) do
@@ -381,6 +492,37 @@ defmodule JsonCompactor do
 
       {:error, message} ->
         {:error, message}
+    end
+  end
+
+  # Reconstruct struct from map with __struct__ field
+  defp reconstruct_struct(%{"__struct__" => struct_name} = map) do
+    try do
+      # Handle different formats of module names
+      module =
+        case struct_name do
+          name when is_binary(name) ->
+            String.to_existing_atom(name)
+
+          name when is_atom(name) ->
+            name
+
+          _ ->
+            nil
+        end
+
+      if module do
+        # Remove struct marker and create struct
+        data_map = Map.delete(map, "__struct__")
+        struct!(module, data_map)
+      else
+        # Invalid struct name, return as regular map
+        Map.delete(map, "__struct__")
+      end
+    rescue
+      ArgumentError ->
+        # Module doesn't exist, return as regular map
+        Map.delete(map, "__struct__")
     end
   end
 end
