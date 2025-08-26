@@ -220,10 +220,8 @@ defmodule JsonCompactor do
 
   # Batch add children to queue for better performance
   @spec add_children_batch([json_value()], :queue.queue()) :: :queue.queue()
-  defp add_children_batch([], queue), do: queue
-
-  defp add_children_batch([child | rest], queue) do
-    add_children_batch(rest, :queue.in(child, queue))
+  defp add_children_batch(children, queue) do
+    Enum.reduce(children, queue, &:queue.in/2)
   end
 
   # Phase 1: BFS traversal to collect values that need references (maps, lists, strings)
@@ -258,16 +256,16 @@ defmodule JsonCompactor do
     end
   end
 
-  # Phase 2: Build compacted versions of complex structures
+  # Phase 2: Build compacted versions of complex structures in single pass
   @spec build_compacted_structures(map()) :: map()
   defp build_compacted_structures(value_to_index) do
-    # Pre-compute string indices to avoid repeated conversions
-    string_indices =
-      Map.new(value_to_index, fn {value, index} -> {value, to_string(index)} end)
-
-    Enum.reduce(value_to_index, %{}, fn {value, index}, acc ->
+    # Pre-compute all string indices once
+    string_indices = Map.new(value_to_index, fn {value, index} -> {value, to_string(index)} end)
+    
+    # Single pass to build compacted structures
+    Map.new(value_to_index, fn {value, index} ->
       compacted_value = compact_value(value, string_indices)
-      Map.put(acc, compacted_value, index)
+      {compacted_value, index}
     end)
   end
 
@@ -375,8 +373,16 @@ defmodule JsonCompactor do
     array
     |> Enum.with_index()
     |> Map.new(fn
-      {"Elixir." <> _ = struct_name, index} ->
-        {to_string(index), String.to_existing_atom(struct_name)}
+      # Handle struct module names that were serialized as strings during compaction.
+      # These are safe to convert back to atoms since they came from existing structs.
+      {"Elixir." <> _module_suffix = struct_name, index} when is_binary(struct_name) ->
+        try do
+          {to_string(index), String.to_existing_atom(struct_name)}
+        rescue
+          ArgumentError ->
+            # If atom doesn't exist, treat as regular string (safety fallback)
+            {to_string(index), struct_name}
+        end
 
       {value, index} ->
         {to_string(index), value}
