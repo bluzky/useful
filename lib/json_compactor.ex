@@ -298,38 +298,39 @@ defmodule JsonCompactor do
   # Compact a single value based on its type
   @spec compact_value(json_value(), map()) :: json_value()
   defp compact_value(data, string_indices) when is_struct(data) do
-    # For other structs, preserve type info and convert atom keys
+    # Reuse map logic for struct fields, then add __struct__ key
     map = Map.from_struct(data)
     struct_name = to_string(data.__struct__)
-
-    # Convert atom keys to ":atomname" and add struct marker
-    converted_map =
-      Map.new(map, fn {key, value} ->
-        # Struct fields are always atoms
-        key_str = ":" <> Atom.to_string(key)
-        {key_str, value}
-      end)
-
-    base_map =
-      Map.put(converted_map, "__struct__", struct_name)
-
-    # Apply reference resolution
-    resolve_map_references(base_map, string_indices, fn key ->
-      # Keep struct name as-is
-      key == "__struct__"
-    end)
+    
+    # Process struct fields using the same logic as regular maps
+    compacted_map = compact_value(map, string_indices)
+    
+    # Add __struct__ key (preserved as-is, not referenced)
+    Map.put(compacted_map, "__struct__", struct_name)
   end
 
   defp compact_value(map, string_indices) when is_map(map) do
-    # Convert atom keys to ":atomname" format and apply reference resolution
-    converted_map =
-      Map.new(map, fn {key, value} ->
-        # Convert key inline
-        new_key = if is_atom(key), do: ":" <> Atom.to_string(key), else: key
-        {new_key, value}
-      end)
-
-    resolve_map_references(converted_map, string_indices, fn _key -> false end)
+    # Single iteration: convert atom keys and apply reference resolution
+    Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
+      # Convert atom key to ":atomname" format
+      converted_key = if is_atom(key), do: ":" <> Atom.to_string(key), else: key
+      
+      # Reference the KEY if it needs referencing
+      referenced_key = if needs_reference?(converted_key) do
+        Map.get(string_indices, converted_key, converted_key)
+      else
+        converted_key
+      end
+      
+      # Reference the VALUE if it needs referencing  
+      referenced_value = if needs_reference?(child_value) do
+        Map.get(string_indices, child_value, child_value)
+      else
+        child_value
+      end
+      
+      Map.put(acc_map, referenced_key, referenced_value)
+    end)
   end
 
   defp compact_value(list, string_indices) when is_list(list) do
@@ -352,33 +353,6 @@ defmodule JsonCompactor do
 
   defp compact_value(primitive, _string_indices) do
     primitive
-  end
-
-  # Apply reference resolution to map keys and values with optional key preservation
-  @spec resolve_map_references(map(), map(), (String.t() -> boolean())) :: map()
-  defp resolve_map_references(map, string_indices, preserve_key_fn) do
-    Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
-      if preserve_key_fn.(key) do
-        # Keep key and value as-is (for __struct__ etc.)
-        Map.put(acc_map, key, child_value)
-      else
-        # Reference the KEY if it needs referencing
-        referenced_key = if needs_reference?(key) do
-          Map.get(string_indices, key, key)  # Fall back to original if not found
-        else
-          key
-        end
-        
-        # Reference the VALUE if it needs referencing  
-        referenced_value = if needs_reference?(child_value) do
-          Map.get(string_indices, child_value, child_value)
-        else
-          child_value
-        end
-        
-        Map.put(acc_map, referenced_key, referenced_value)
-      end
-    end)
   end
 
   # Check if a value needs to be compacted (stored in reference table)
