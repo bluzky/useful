@@ -98,6 +98,35 @@ defmodule JsonCompactorBench do
     }
   end
 
+  defp generate_user_list(size) do
+    # Generate a realistic list of user records with repeated field keys
+    departments = ["Engineering", "Marketing", "Sales", "Support", "HR"]
+    roles = ["admin", "user", "manager", "intern"]
+    locations = ["San Francisco", "New York", "London", "Tokyo", "Berlin"]
+    
+    Enum.map(1..size, fn i ->
+      %{
+        "id" => i,
+        "name" => "User#{i}",
+        "email" => "user#{i}@company.com",
+        "role" => Enum.at(roles, rem(i, length(roles))),
+        "department" => Enum.at(departments, rem(i, length(departments))),
+        "location" => Enum.at(locations, rem(i, length(locations))),
+        "active" => rem(i, 4) != 0,  # 75% active users
+        "created_at" => "2024-#{rem(i, 12) + 1}-01",
+        "profile" => %{
+          "avatar_url" => "https://example.com/avatar#{rem(i, 10)}.jpg",
+          "bio" => "Bio for user #{i}",
+          "preferences" => %{
+            "theme" => (if rem(i, 2) == 0, do: "dark", else: "light"),
+            "notifications" => rem(i, 3) == 0,
+            "language" => (if rem(i, 5) == 0, do: "es", else: "en")
+          }
+        }
+      }
+    end)
+  end
+
   # Benchmark scenarios
   def run do
     IO.puts("Running JsonCompactor benchmarks...")
@@ -123,6 +152,10 @@ defmodule JsonCompactorBench do
     large_structure_small = generate_large_structure(50)
     large_structure_medium = generate_large_structure(200)
     large_structure_large = generate_large_structure(1000)
+
+    user_list_small = generate_user_list(25)
+    user_list_medium = generate_user_list(100)
+    user_list_large = generate_user_list(250)
 
     IO.puts("\n1. Simple Map Compaction Benchmarks")
     IO.puts("-" <> String.duplicate("-", 40))
@@ -189,14 +222,29 @@ defmodule JsonCompactorBench do
       memory_time: 1
     )
 
+    IO.puts("\n6. User List Compaction Benchmarks (Field Key Deduplication)")
+    IO.puts("-" <> String.duplicate("-", 40))
+    
+    Benchee.run(
+      %{
+        "compact_user_list_small (25 users)" => fn -> JsonCompactor.compact(user_list_small) end,
+        "compact_user_list_medium (100 users)" => fn -> JsonCompactor.compact(user_list_medium) end,
+        "compact_user_list_large (250 users)" => fn -> JsonCompactor.compact(user_list_large) end
+      },
+      time: 3,
+      memory_time: 1
+    )
+
     # Pre-compact data for decompaction benchmarks
     compacted_simple_large = JsonCompactor.compact(large_simple)
     compacted_nested_deep = JsonCompactor.compact(nested_deep)
     compacted_duplicate_large = JsonCompactor.compact(duplicate_large)
     compacted_mixed_large = JsonCompactor.compact(mixed_large)
     compacted_large_struct_large = JsonCompactor.compact(large_structure_large)
+    compacted_user_list_medium = JsonCompactor.compact(user_list_medium)
+    compacted_user_list_large = JsonCompactor.compact(user_list_large)
 
-    IO.puts("\n6. Decompaction Benchmarks")
+    IO.puts("\n7. Decompaction Benchmarks")
     IO.puts("-" <> String.duplicate("-", 40))
     
     Benchee.run(
@@ -205,13 +253,15 @@ defmodule JsonCompactorBench do
         "decompact_nested_deep (15 levels)" => fn -> JsonCompactor.decompact(compacted_nested_deep) end,
         "decompact_duplicate_large (500 users)" => fn -> JsonCompactor.decompact(compacted_duplicate_large) end,
         "decompact_mixed_large (500 items)" => fn -> JsonCompactor.decompact(compacted_mixed_large) end,
-        "decompact_large_struct_large (1000 records)" => fn -> JsonCompactor.decompact(compacted_large_struct_large) end
+        "decompact_large_struct_large (1000 records)" => fn -> JsonCompactor.decompact(compacted_large_struct_large) end,
+        "decompact_user_list_medium (100 users)" => fn -> JsonCompactor.decompact(compacted_user_list_medium) end,
+        "decompact_user_list_large (250 users)" => fn -> JsonCompactor.decompact(compacted_user_list_large) end
       },
       time: 3,
       memory_time: 1
     )
 
-    IO.puts("\n7. Round-trip Benchmarks (Compact + Decompact)")
+    IO.puts("\n8. Round-trip Benchmarks (Compact + Decompact)")
     IO.puts("-" <> String.duplicate("-", 40))
     
     Benchee.run(
@@ -231,6 +281,14 @@ defmodule JsonCompactorBench do
         "roundtrip_large_struct_large" => fn ->
           compacted = JsonCompactor.compact(large_structure_large)
           JsonCompactor.decompact(compacted)
+        end,
+        "roundtrip_user_list_medium" => fn ->
+          compacted = JsonCompactor.compact(user_list_medium)
+          JsonCompactor.decompact(compacted)
+        end,
+        "roundtrip_user_list_large" => fn ->
+          compacted = JsonCompactor.compact(user_list_large)
+          JsonCompactor.decompact(compacted)
         end
       },
       time: 3,
@@ -238,13 +296,15 @@ defmodule JsonCompactorBench do
     )
 
     # Compression ratio analysis
-    IO.puts("\n8. Compression Ratio Analysis")
+    IO.puts("\n9. Compression Ratio Analysis")
     IO.puts("-" <> String.duplicate("-", 40))
     
     analyze_compression_ratio("Simple Large", large_simple)
     analyze_compression_ratio("Duplicate Large", duplicate_large)
     analyze_compression_ratio("Mixed Large", mixed_large)
     analyze_compression_ratio("Large Structure", large_structure_large)
+    analyze_compression_ratio("User List Medium (100 users)", user_list_medium)
+    analyze_compression_ratio("User List Large (250 users)", user_list_large)
 
     IO.puts("\nBenchmark completed!")
   end

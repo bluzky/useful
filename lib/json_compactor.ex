@@ -3,16 +3,23 @@ defmodule JsonCompactor do
   Compacts and decompacts JSON-like data structures by flattening nested maps and lists
   into arrays with reference indices, providing memory efficiency and deduplication.
 
-  This module implements a serialization technique that extracts nested structures into
-  a flat array and replaces them with string indices, similar to how some databases
-  and serialization libraries optimize storage and transmission of complex data.
+  This module implements a serialization technique that extracts nested structures and
+  field keys into a flat array and replaces them with string indices, similar to how
+  some databases and serialization libraries optimize storage and transmission of complex data.
 
   ## Benefits
 
-  - **Memory Efficiency**: Identical structures are stored only once
-  - **Deduplication**: Eliminates redundant nested objects
-  - **Smaller Payloads**: Reduces JSON size for network transmission
+  - **Memory Efficiency**: Identical structures and field keys are stored only once
+  - **Field Key Deduplication**: Repeated map keys (like "name", "email") are deduplicated automatically
+  - **Value Deduplication**: Eliminates redundant nested objects and strings
+  - **Smaller Payloads**: Significant JSON size reduction for network transmission
   - **Referential Consistency**: Updates to shared structures affect all references
+
+  ## Field Key Referencing
+
+  The compactor automatically deduplicates repeated field keys, providing significant
+  compression benefits for structured data like API responses, database results, and
+  configuration objects where field names are repeated across many records.
 
   ## Example
 
@@ -24,23 +31,27 @@ defmodule JsonCompactor do
       iex> compacted = JsonCompactor.compact(data)
       iex> compacted
       [
-        %{
-          "user" => "1",
-          "backup_user" => "1",
-          "settings" => "4"
-        },
-        %{"name" => "2", "role" => "3"},
-        "Alice",
+        %{"1" => "4", "2" => "5", "3" => "4"},  # Root with referenced keys
+        "backup_user",                          # Field keys stored once
+        "settings",
+        "user", 
+        %{"6" => "8", "7" => "9"},             # Nested map with referenced keys
+        %{"10" => "11"},                       # Settings map
+        "name",                                # Repeated field keys deduplicated
+        "role",
+        "Alice",                               # Values deduplicated
         "admin",
-        %{"theme" => "5"},
+        "theme",
         "dark"
       ]
       iex> JsonCompactor.decompact(compacted) == data
       true
 
-  In this example, all values are extracted and deduplicated - identical user maps
-  reference the same object at index "1", and repeated strings like "Alice" and
-  "admin" are also deduplicated.
+  In this example, both field keys and values are extracted and deduplicated:
+  - Field keys like "name" and "role" are stored once at indices 6 and 7
+  - Identical user maps reference the same object at index "4"  
+  - Repeated strings like "Alice" and "admin" are also deduplicated
+  - The root map keys "user", "backup_user", "settings" are also referenced
   """
 
   @type json_value ::
@@ -56,8 +67,11 @@ defmodule JsonCompactor do
   @type compacted_array :: [json_value() | String.t()]
 
   @doc """
-  Compacts a data structure by extracting maps, lists, and strings into a flat array
+  Compacts a data structure by extracting maps, lists, field keys, and strings into a flat array
   and replacing them with string reference indices. Other data types are kept as original values.
+
+  Both map field keys and values are automatically deduplicated, providing significant compression
+  benefits for structured data with repeated field names.
 
   ## Parameters
 
@@ -68,24 +82,32 @@ defmodule JsonCompactor do
   A list where:
   - For simple values (numbers, booleans, nil, dates): `[original_value]`
   - For complex structures:
-    - First element: The root structure with maps/lists/strings replaced by string indices
-    - Remaining elements: The extracted maps/lists/strings in order of their indices
+    - First element: The root structure with field keys, maps, lists, and strings replaced by indices
+    - Remaining elements: The extracted field keys, maps, lists, and strings in order of their indices
 
   ## Examples
 
+  Simple map with field key referencing:
+
       iex> JsonCompactor.compact(%{"a" => 1})
-      [%{"a" => 1}]
+      [%{"1" => 1}, "a"]
+
+  Field keys and string values both referenced:
 
       iex> JsonCompactor.compact(%{"a" => "hello"})
-      [%{"a" => "1"}, "hello"]
+      [%{"1" => "2"}, "a", "hello"]
+
+  Multiple field keys referenced:
 
       iex> JsonCompactor.compact(%{"name" => "Alice", "age" => 30, "active" => true})
-      [%{"name" => "1", "age" => 30, "active" => true}, "Alice"]
+      [%{"1" => true, "2" => 30, "3" => "4"}, "active", "age", "name", "Alice"]
+
+  List with string value referencing:
 
       iex> JsonCompactor.compact([1, "hello", true])
-      [["1", 1, true], "hello"]
+      [[1, "1", true], "hello"]
 
-  Complex nesting with deduplication:
+  Complex nesting with field key and value deduplication:
 
       iex> data = %{
       ...>   "user" => %{"name" => "Alice", "role" => "admin"},
@@ -94,15 +116,17 @@ defmodule JsonCompactor do
       ...> }
       iex> JsonCompactor.compact(data)
       [
-        %{
-          "user" => "1",
-          "backup_user" => "1",
-          "settings" => "4"
-        },
-        %{"name" => "2", "role" => "3"},
-        "Alice",
-        "admin",
-        %{"theme" => "5"},
+        %{"1" => "4", "2" => "5", "3" => "4"},  # Root with referenced keys
+        "backup_user",                          # Field keys deduplicated
+        "settings",
+        "user",
+        %{"6" => "8", "7" => "9"},             # Nested map with referenced keys
+        %{"10" => "11"},                       # Settings map
+        "name",                                # Field key "name" stored once
+        "role",                                # Field key "role" stored once  
+        "Alice",                               # Value "Alice" stored once
+        "admin",                               # Value "admin" stored once
+        "theme",
         "dark"
       ]
 
@@ -111,7 +135,7 @@ defmodule JsonCompactor do
   def compact(data) do
     # Always return a list
     if needs_compaction_reference?(data) do
-      {_compacted, lookup_table} = build_lookup_table_bfs(data)
+      {_compacted, lookup_table} = build_lookup_table_dfs(data)
 
       # Convert lookup table to array format
       array =
@@ -180,12 +204,12 @@ defmodule JsonCompactor do
 
   def decompact(_primitive_value), do: {:error, "Input must be a list"}
 
-  # Build lookup table using breadth-first search
-  @spec build_lookup_table_bfs(json_value()) :: {String.t() | json_value(), map()}
-  defp build_lookup_table_bfs(root) do
-    # Phase 1: BFS to collect all unique values and assign indices
-    queue = :queue.in(root, :queue.new())
-    {value_to_index, _} = bfs_collect_values(queue, %{}, 0)
+  # Build lookup table using depth-first search
+  @spec build_lookup_table_dfs(json_value()) :: {String.t() | json_value(), map()}
+  defp build_lookup_table_dfs(root) do
+    # Phase 1: DFS to collect all unique values and assign indices
+    stack = [root]
+    {value_to_index, _} = dfs_collect_values(stack, %{}, 0)
 
     # Phase 2: Build compacted versions of complex structures
     final_lookup = build_compacted_structures(value_to_index)
@@ -194,65 +218,63 @@ defmodule JsonCompactor do
     {Integer.to_string(root_index), final_lookup}
   end
 
-  # Helper function to add children to queue with batch processing
-  @spec add_children_to_queue(json_value(), :queue.queue()) :: :queue.queue()
-  defp add_children_to_queue(value, queue) do
+  # Helper function to add children to stack 
+  @spec add_children_to_stack(json_value(), [json_value()]) :: [json_value()]
+  defp add_children_to_stack(value, stack) do
     case value do
       map when is_map(map) ->
-        children =
-          map
-          |> Map.delete(:__struct__)
-          |> Map.values()
+        clean_map = Map.delete(map, :__struct__)
+        
+        # Collect both string keys and values for referencing
+        keys = Map.keys(clean_map) |> Enum.filter(&is_binary/1)
+        values = Map.values(clean_map)
+        children = keys ++ values
 
-        add_children_batch(children, queue)
+        # Prepend children to stack (DFS order)
+        children ++ stack
 
       list when is_list(list) ->
-        add_children_batch(list, queue)
+        # Prepend list items to stack
+        list ++ stack
 
       tuple when is_tuple(tuple) ->
-        add_children_batch(Tuple.to_list(tuple), queue)
+        # Prepend tuple elements to stack
+        Tuple.to_list(tuple) ++ stack
 
       _primitive ->
         # Strings and other primitives don't have children
-        queue
+        stack
     end
   end
 
-  # Batch add children to queue for better performance
-  @spec add_children_batch([json_value()], :queue.queue()) :: :queue.queue()
-  defp add_children_batch(children, queue) do
-    Enum.reduce(children, queue, &:queue.in/2)
+  # Phase 1: DFS traversal to collect values that need references (maps, lists, strings)
+  @spec dfs_collect_values([json_value()], map(), non_neg_integer()) :: {map(), non_neg_integer()}
+  defp dfs_collect_values([], value_to_index, counter) do
+    # Empty stack - traversal complete
+    {value_to_index, counter}
   end
 
-  # Phase 1: BFS traversal to collect values that need references (maps, lists, strings)
-  @spec bfs_collect_values(:queue.queue(), map(), non_neg_integer()) :: {map(), non_neg_integer()}
-  defp bfs_collect_values(queue, value_to_index, counter) do
-    case :queue.out(queue) do
-      {{:value, value}, remaining_queue} ->
-        case Map.get(value_to_index, value) do
-          nil ->
-            # Check if this value needs to be stored in reference table
-            if needs_reference?(value) do
-              # Store value and assign index
-              updated_index_map = Map.put(value_to_index, value, counter)
-              new_counter = counter + 1
+  defp dfs_collect_values([value | remaining_stack], value_to_index, counter) do
+    case Map.get(value_to_index, value) do
+      nil ->
+        # Check if this value needs to be stored in reference table
+        if needs_reference?(value) do
+          # Store value and assign index
+          updated_index_map = Map.put(value_to_index, value, counter)
+          new_counter = counter + 1
 
-              # Add children to queue
-              children_queue = add_children_to_queue(value, remaining_queue)
-              bfs_collect_values(children_queue, updated_index_map, new_counter)
-            else
-              # For non-reference values (numbers, booleans, etc.), still traverse children
-              children_queue = add_children_to_queue(value, remaining_queue)
-              bfs_collect_values(children_queue, value_to_index, counter)
-            end
-
-          _existing_index ->
-            # Value already seen, skip and continue
-            bfs_collect_values(remaining_queue, value_to_index, counter)
+          # Add children to stack
+          children_stack = add_children_to_stack(value, remaining_stack)
+          dfs_collect_values(children_stack, updated_index_map, new_counter)
+        else
+          # For non-reference values (numbers, booleans, etc.), still traverse children
+          children_stack = add_children_to_stack(value, remaining_stack)
+          dfs_collect_values(children_stack, value_to_index, counter)
         end
 
-      {:empty, _} ->
-        {value_to_index, counter}
+      _existing_index ->
+        # Value already seen, skip and continue
+        dfs_collect_values(remaining_stack, value_to_index, counter)
     end
   end
 
@@ -272,38 +294,39 @@ defmodule JsonCompactor do
   # Compact a single value based on its type
   @spec compact_value(json_value(), map()) :: json_value()
   defp compact_value(data, string_indices) when is_struct(data) do
-    # For other structs, preserve type info and convert atom keys
+    # Reuse map logic for struct fields, then add __struct__ key
     map = Map.from_struct(data)
     struct_name = to_string(data.__struct__)
-
-    # Convert atom keys to ":atomname" and add struct marker
-    converted_map =
-      Map.new(map, fn {key, value} ->
-        # Struct fields are always atoms
-        key_str = ":" <> Atom.to_string(key)
-        {key_str, value}
-      end)
-
-    base_map =
-      Map.put(converted_map, "__struct__", struct_name)
-
-    # Apply reference resolution
-    resolve_map_references(base_map, string_indices, fn key ->
-      # Keep struct name as-is
-      key == "__struct__"
-    end)
+    
+    # Process struct fields using the same logic as regular maps
+    compacted_map = compact_value(map, string_indices)
+    
+    # Add __struct__ key (preserved as-is, not referenced)
+    Map.put(compacted_map, "__struct__", struct_name)
   end
 
   defp compact_value(map, string_indices) when is_map(map) do
-    # Convert atom keys to ":atomname" format and apply reference resolution
-    converted_map =
-      Map.new(map, fn {key, value} ->
-        # Convert key inline
-        new_key = if is_atom(key), do: ":" <> Atom.to_string(key), else: key
-        {new_key, value}
-      end)
-
-    resolve_map_references(converted_map, string_indices, fn _key -> false end)
+    # Single iteration: convert atom keys and apply reference resolution
+    Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
+      # Convert atom key to ":atomname" format
+      converted_key = if is_atom(key), do: ":" <> Atom.to_string(key), else: key
+      
+      # Reference the KEY if it needs referencing
+      referenced_key = if needs_reference?(converted_key) do
+        Map.get(string_indices, converted_key, converted_key)
+      else
+        converted_key
+      end
+      
+      # Reference the VALUE if it needs referencing  
+      referenced_value = if needs_reference?(child_value) do
+        Map.get(string_indices, child_value, child_value)
+      else
+        child_value
+      end
+      
+      Map.put(acc_map, referenced_key, referenced_value)
+    end)
   end
 
   defp compact_value(list, string_indices) when is_list(list) do
@@ -326,24 +349,6 @@ defmodule JsonCompactor do
 
   defp compact_value(primitive, _string_indices) do
     primitive
-  end
-
-  # Apply reference resolution to map values with optional key preservation
-  @spec resolve_map_references(map(), map(), (String.t() -> boolean())) :: map()
-  defp resolve_map_references(map, string_indices, preserve_key_fn) do
-    Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
-      if preserve_key_fn.(key) do
-        # Keep value as-is
-        Map.put(acc_map, key, child_value)
-      else
-        if needs_reference?(child_value) do
-          child_index_str = Map.get(string_indices, child_value)
-          Map.put(acc_map, key, child_index_str)
-        else
-          Map.put(acc_map, key, child_value)
-        end
-      end
-    end)
   end
 
   # Check if a value needs to be compacted (stored in reference table)
@@ -425,27 +430,41 @@ defmodule JsonCompactor do
           {:cont, {:ok, Map.put(acc, key, value)}}
 
         {key, value}, {:ok, acc} ->
-          case resolve_references(value, index_map, visited) do
-            {:ok, resolved_value} ->
-              # Convert key inline
-              new_key =
-                case key do
-                  ":" <> atom_name ->
-                    try do
-                      String.to_existing_atom(atom_name)
-                    rescue
-                      # Keep as string if atom doesn't exist
-                      ArgumentError -> key
+          # RESOLVE KEY if it's a reference
+          resolved_key_result = if is_binary(key) and Map.has_key?(index_map, key) do
+            resolve_references(key, index_map, visited)
+          else
+            {:ok, key}
+          end
+          
+          case resolved_key_result do
+            {:ok, resolved_key} ->
+              # RESOLVE VALUE
+              case resolve_references(value, index_map, visited) do
+                {:ok, resolved_value} ->
+                  # Convert atom keys if needed
+                  final_key =
+                    case resolved_key do
+                      ":" <> atom_name ->
+                        try do
+                          String.to_existing_atom(atom_name)
+                        rescue
+                          # Keep as string if atom doesn't exist
+                          ArgumentError -> resolved_key
+                        end
+
+                      _ ->
+                        # Regular string key
+                        resolved_key
                     end
 
-                  _ ->
-                    # Regular string key
-                    key
-                end
+                  {:cont, {:ok, Map.put(acc, final_key, resolved_value)}}
 
-              {:cont, {:ok, Map.put(acc, new_key, resolved_value)}}
-
-            {:error, message} ->
+                {:error, message} ->
+                  {:halt, {:error, message}}
+              end
+            
+            {:error, message} -> 
               {:halt, {:error, message}}
           end
       end)

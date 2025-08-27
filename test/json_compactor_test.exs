@@ -25,10 +25,13 @@ defmodule JsonCompactorTest do
       result = JsonCompactor.compact(input)
 
       assert is_list(result)
-      # Root map + "Alice" string
-      assert length(result) == 2
-      assert Enum.at(result, 0) == %{"name" => "1", "age" => 30, "active" => true}
+      # Root map + field keys + "Alice" string
+      assert length(result) == 5
+      assert Enum.at(result, 0) == %{"1" => true, "2" => 30, "3" => "4"}
       assert "Alice" in result
+      assert "active" in result
+      assert "age" in result
+      assert "name" in result
     end
 
     test "creates references only for strings in lists" do
@@ -53,17 +56,18 @@ defmodule JsonCompactorTest do
 
       result = JsonCompactor.compact(input)
 
-      # Should create references for: root map, "numbers" list, "booleans" list, "text" string
+      # Should create references for: root map, field keys, "numbers" list, "booleans" list, "text" string
       assert is_list(result)
 
       root = Enum.at(result, 0)
       # Numbers and booleans should stay as original values
       assert is_map(root)
-      assert root["null_value"] == nil
+      assert root["2"] == nil  # "null_value" is now referenced as "2"
 
-      # But string should be referenced
-      assert is_binary(root["string_value"]) and root["string_value"] != "text"
+      # String should be referenced - both the field key and value
+      assert is_binary(root["4"]) and root["4"] != "text"  # "string_value" key is now referenced as "4" 
       assert "text" in result
+      assert "string_value" in result  # Field key is also in the array
     end
 
     test "deduplicates identical strings only" do
@@ -103,10 +107,15 @@ defmodule JsonCompactorTest do
 
       # Find the root map
       root = Enum.at(result, 0)
+      # Find the key indices for user1, user2, user3
+      user1_key_idx = to_string(Enum.find_index(result, &(&1 == "user1")))
+      user2_key_idx = to_string(Enum.find_index(result, &(&1 == "user2")))  
+      user3_key_idx = to_string(Enum.find_index(result, &(&1 == "user3")))
+      
       # Same map reference
-      assert root["user1"] == root["user2"]
+      assert root[user1_key_idx] == root[user2_key_idx]
       # Different map reference
-      assert root["user1"] != root["user3"]
+      assert root[user1_key_idx] != root[user3_key_idx]
 
       # Check that "Alice" string is deduplicated
       alice_count = Enum.count(result, fn x -> x == "Alice" end)
@@ -125,10 +134,15 @@ defmodule JsonCompactorTest do
       result = JsonCompactor.compact(input)
       root = Enum.at(result, 0)
 
+      # Find the key indices
+      list1_key_idx = to_string(Enum.find_index(result, &(&1 == "list1")))
+      list2_key_idx = to_string(Enum.find_index(result, &(&1 == "list2")))
+      list3_key_idx = to_string(Enum.find_index(result, &(&1 == "list3")))
+
       # Same reference
-      assert root["list1"] == root["list2"]
+      assert root[list1_key_idx] == root[list2_key_idx]
       # Different reference
-      assert root["list1"] != root["list3"]
+      assert root[list1_key_idx] != root[list3_key_idx]
     end
 
     test "handles deeply nested structures" do
@@ -145,11 +159,15 @@ defmodule JsonCompactorTest do
       result = JsonCompactor.compact(input)
 
       assert result == [
-               %{"level1" => "1"},
-               %{"level2" => "2"},
-               %{"level3" => "3"},
-               %{"value" => "4"},
-               "deep"
+               %{"1" => "2"},      # Root: level1 -> index 2
+               "level1",           # Key at index 1
+               %{"3" => "4"},      # level2 -> index 4 
+               "level2",           # Key at index 3
+               %{"5" => "6"},      # level3 -> index 6
+               "level3",           # Key at index 5  
+               %{"7" => "8"},      # value -> index 8
+               "value",            # Key at index 7
+               "deep"              # Value at index 8
              ]
     end
 
@@ -388,10 +406,11 @@ defmodule JsonCompactorTest do
 
       assert restored == original
 
-      # Should have significant deduplication due to "shared_value"
+      # Should have significant deduplication due to "shared_value" and field keys
       compacted_size = length(compacted)
       # Should be much less than 100 * 3 + overhead due to deduplication
-      assert compacted_size == 203
+      # Now includes field key deduplication, so slightly higher but still efficient
+      assert compacted_size == 207
     end
 
     test "handles numeric string values" do
