@@ -3,16 +3,23 @@ defmodule JsonCompactor do
   Compacts and decompacts JSON-like data structures by flattening nested maps and lists
   into arrays with reference indices, providing memory efficiency and deduplication.
 
-  This module implements a serialization technique that extracts nested structures into
-  a flat array and replaces them with string indices, similar to how some databases
-  and serialization libraries optimize storage and transmission of complex data.
+  This module implements a serialization technique that extracts nested structures and
+  field keys into a flat array and replaces them with string indices, similar to how
+  some databases and serialization libraries optimize storage and transmission of complex data.
 
   ## Benefits
 
-  - **Memory Efficiency**: Identical structures are stored only once
-  - **Deduplication**: Eliminates redundant nested objects
-  - **Smaller Payloads**: Reduces JSON size for network transmission
+  - **Memory Efficiency**: Identical structures and field keys are stored only once
+  - **Field Key Deduplication**: Repeated map keys (like "name", "email") are deduplicated automatically
+  - **Value Deduplication**: Eliminates redundant nested objects and strings
+  - **Smaller Payloads**: Significant JSON size reduction for network transmission
   - **Referential Consistency**: Updates to shared structures affect all references
+
+  ## Field Key Referencing
+
+  The compactor automatically deduplicates repeated field keys, providing significant
+  compression benefits for structured data like API responses, database results, and
+  configuration objects where field names are repeated across many records.
 
   ## Example
 
@@ -24,23 +31,27 @@ defmodule JsonCompactor do
       iex> compacted = JsonCompactor.compact(data)
       iex> compacted
       [
-        %{
-          "user" => "1",
-          "backup_user" => "1",
-          "settings" => "4"
-        },
-        %{"name" => "2", "role" => "3"},
-        "Alice",
+        %{"1" => "4", "2" => "5", "3" => "4"},  # Root with referenced keys
+        "backup_user",                          # Field keys stored once
+        "settings",
+        "user", 
+        %{"6" => "8", "7" => "9"},             # Nested map with referenced keys
+        %{"10" => "11"},                       # Settings map
+        "name",                                # Repeated field keys deduplicated
+        "role",
+        "Alice",                               # Values deduplicated
         "admin",
-        %{"theme" => "5"},
+        "theme",
         "dark"
       ]
       iex> JsonCompactor.decompact(compacted) == data
       true
 
-  In this example, all values are extracted and deduplicated - identical user maps
-  reference the same object at index "1", and repeated strings like "Alice" and
-  "admin" are also deduplicated.
+  In this example, both field keys and values are extracted and deduplicated:
+  - Field keys like "name" and "role" are stored once at indices 6 and 7
+  - Identical user maps reference the same object at index "4"  
+  - Repeated strings like "Alice" and "admin" are also deduplicated
+  - The root map keys "user", "backup_user", "settings" are also referenced
   """
 
   @type json_value ::
@@ -56,8 +67,11 @@ defmodule JsonCompactor do
   @type compacted_array :: [json_value() | String.t()]
 
   @doc """
-  Compacts a data structure by extracting maps, lists, and strings into a flat array
+  Compacts a data structure by extracting maps, lists, field keys, and strings into a flat array
   and replacing them with string reference indices. Other data types are kept as original values.
+
+  Both map field keys and values are automatically deduplicated, providing significant compression
+  benefits for structured data with repeated field names.
 
   ## Parameters
 
@@ -68,24 +82,32 @@ defmodule JsonCompactor do
   A list where:
   - For simple values (numbers, booleans, nil, dates): `[original_value]`
   - For complex structures:
-    - First element: The root structure with maps/lists/strings replaced by string indices
-    - Remaining elements: The extracted maps/lists/strings in order of their indices
+    - First element: The root structure with field keys, maps, lists, and strings replaced by indices
+    - Remaining elements: The extracted field keys, maps, lists, and strings in order of their indices
 
   ## Examples
 
+  Simple map with field key referencing:
+
       iex> JsonCompactor.compact(%{"a" => 1})
-      [%{"a" => 1}]
+      [%{"1" => 1}, "a"]
+
+  Field keys and string values both referenced:
 
       iex> JsonCompactor.compact(%{"a" => "hello"})
-      [%{"a" => "1"}, "hello"]
+      [%{"1" => "2"}, "a", "hello"]
+
+  Multiple field keys referenced:
 
       iex> JsonCompactor.compact(%{"name" => "Alice", "age" => 30, "active" => true})
-      [%{"name" => "1", "age" => 30, "active" => true}, "Alice"]
+      [%{"1" => true, "2" => 30, "3" => "4"}, "active", "age", "name", "Alice"]
+
+  List with string value referencing:
 
       iex> JsonCompactor.compact([1, "hello", true])
-      [["1", 1, true], "hello"]
+      [[1, "1", true], "hello"]
 
-  Complex nesting with deduplication:
+  Complex nesting with field key and value deduplication:
 
       iex> data = %{
       ...>   "user" => %{"name" => "Alice", "role" => "admin"},
@@ -94,15 +116,17 @@ defmodule JsonCompactor do
       ...> }
       iex> JsonCompactor.compact(data)
       [
-        %{
-          "user" => "1",
-          "backup_user" => "1",
-          "settings" => "4"
-        },
-        %{"name" => "2", "role" => "3"},
-        "Alice",
-        "admin",
-        %{"theme" => "5"},
+        %{"1" => "4", "2" => "5", "3" => "4"},  # Root with referenced keys
+        "backup_user",                          # Field keys deduplicated
+        "settings",
+        "user",
+        %{"6" => "8", "7" => "9"},             # Nested map with referenced keys
+        %{"10" => "11"},                       # Settings map
+        "name",                                # Field key "name" stored once
+        "role",                                # Field key "role" stored once  
+        "Alice",                               # Value "Alice" stored once
+        "admin",                               # Value "admin" stored once
+        "theme",
         "dark"
       ]
 
@@ -199,10 +223,12 @@ defmodule JsonCompactor do
   defp add_children_to_queue(value, queue) do
     case value do
       map when is_map(map) ->
-        children =
-          map
-          |> Map.delete(:__struct__)
-          |> Map.values()
+        clean_map = Map.delete(map, :__struct__)
+        
+        # Collect both string keys and values for referencing
+        keys = Map.keys(clean_map) |> Enum.filter(&is_binary/1)
+        values = Map.values(clean_map)
+        children = keys ++ values
 
         add_children_batch(children, queue)
 
@@ -328,20 +354,29 @@ defmodule JsonCompactor do
     primitive
   end
 
-  # Apply reference resolution to map values with optional key preservation
+  # Apply reference resolution to map keys and values with optional key preservation
   @spec resolve_map_references(map(), map(), (String.t() -> boolean())) :: map()
   defp resolve_map_references(map, string_indices, preserve_key_fn) do
     Enum.reduce(map, %{}, fn {key, child_value}, acc_map ->
       if preserve_key_fn.(key) do
-        # Keep value as-is
+        # Keep key and value as-is (for __struct__ etc.)
         Map.put(acc_map, key, child_value)
       else
-        if needs_reference?(child_value) do
-          child_index_str = Map.get(string_indices, child_value)
-          Map.put(acc_map, key, child_index_str)
+        # Reference the KEY if it needs referencing
+        referenced_key = if needs_reference?(key) do
+          Map.get(string_indices, key, key)  # Fall back to original if not found
         else
-          Map.put(acc_map, key, child_value)
+          key
         end
+        
+        # Reference the VALUE if it needs referencing  
+        referenced_value = if needs_reference?(child_value) do
+          Map.get(string_indices, child_value, child_value)
+        else
+          child_value
+        end
+        
+        Map.put(acc_map, referenced_key, referenced_value)
       end
     end)
   end
@@ -425,27 +460,41 @@ defmodule JsonCompactor do
           {:cont, {:ok, Map.put(acc, key, value)}}
 
         {key, value}, {:ok, acc} ->
-          case resolve_references(value, index_map, visited) do
-            {:ok, resolved_value} ->
-              # Convert key inline
-              new_key =
-                case key do
-                  ":" <> atom_name ->
-                    try do
-                      String.to_existing_atom(atom_name)
-                    rescue
-                      # Keep as string if atom doesn't exist
-                      ArgumentError -> key
+          # RESOLVE KEY if it's a reference
+          resolved_key_result = if is_binary(key) and Map.has_key?(index_map, key) do
+            resolve_references(key, index_map, visited)
+          else
+            {:ok, key}
+          end
+          
+          case resolved_key_result do
+            {:ok, resolved_key} ->
+              # RESOLVE VALUE
+              case resolve_references(value, index_map, visited) do
+                {:ok, resolved_value} ->
+                  # Convert atom keys if needed
+                  final_key =
+                    case resolved_key do
+                      ":" <> atom_name ->
+                        try do
+                          String.to_existing_atom(atom_name)
+                        rescue
+                          # Keep as string if atom doesn't exist
+                          ArgumentError -> resolved_key
+                        end
+
+                      _ ->
+                        # Regular string key
+                        resolved_key
                     end
 
-                  _ ->
-                    # Regular string key
-                    key
-                end
+                  {:cont, {:ok, Map.put(acc, final_key, resolved_value)}}
 
-              {:cont, {:ok, Map.put(acc, new_key, resolved_value)}}
-
-            {:error, message} ->
+                {:error, message} ->
+                  {:halt, {:error, message}}
+              end
+            
+            {:error, message} -> 
               {:halt, {:error, message}}
           end
       end)
