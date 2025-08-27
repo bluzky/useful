@@ -20,10 +20,10 @@ defmodule DictCompactor do
 
       %{
         data: original_structure_with_references,
-        dictionary: %{
-          "0" => "actual_string_value_1",
-          "1" => "actual_string_value_2"
-        }
+        dictionary: [
+          "actual_string_value_1",  # index 0
+          "actual_string_value_2"   # index 1
+        ]
       }
 
   ## Type Handling
@@ -50,12 +50,12 @@ defmodule DictCompactor do
       iex> DictCompactor.compact(input)
       %{
         data: %{"0" => "1", "2" => "3"},
-        dictionary: %{
-          "0" => "name",
-          "1" => "Alice", 
-          "2" => "role",
-          "3" => "admin"
-        }
+        dictionary: [
+          "name",     # index 0
+          "Alice",    # index 1
+          "role",     # index 2
+          "admin"     # index 3
+        ]
       }
 
       iex> # Atom keys and values with deduplication
@@ -63,12 +63,12 @@ defmodule DictCompactor do
       iex> DictCompactor.compact(input)
       %{
         data: %{"0" => "1", "2" => "3"},
-        dictionary: %{
-          "0" => "_:name",
-          "1" => "Alice",
-          "2" => "_:role", 
-          "3" => "_:admin"
-        }
+        dictionary: [
+          "_:name",   # index 0
+          "Alice",    # index 1
+          "_:role",   # index 2
+          "_:admin"   # index 3
+        ]
       }
 
       iex> # Complex types with JSON-compatible serialization
@@ -76,23 +76,23 @@ defmodule DictCompactor do
       iex> DictCompactor.compact(input)
       %{
         data: %{"0" => "1", "2" => ["__t__", 1, "3"], "4" => %{"5" => "6", "__struct__" => "7"}},
-        dictionary: %{
-          "0" => "_:atom",
-          "1" => "_:hello",
-          "2" => "_:tuple",
-          "3" => "_:two",
-          "4" => "_:struct", 
-          "5" => "_:name",
-          "6" => "Bob",
-          "7" => "Elixir.User"
-        }
+        dictionary: [
+          "_:atom",      # index 0
+          "_:hello",     # index 1
+          "_:tuple",     # index 2
+          "_:two",       # index 3
+          "_:struct",    # index 4
+          "_:name",      # index 5
+          "Bob",         # index 6
+          "Elixir.User"  # index 7
+        ]
       }
 
       iex> # Deduplication in action
       iex> input = %{user1: %{name: "Alice"}, user2: %{name: "Alice"}}
       iex> result = DictCompactor.compact(input)
       iex> # "Alice" appears only once in dictionary despite being used twice
-      iex> Enum.count(Map.values(result.dictionary), fn v -> v == "Alice" end)
+      iex> Enum.count(result.dictionary, fn v -> v == "Alice" end)
       1
 
   ## Performance
@@ -101,12 +101,13 @@ defmodule DictCompactor do
   - **Time Complexity**: O(n) where n = total elements in data structure
   - **Space Complexity**: O(u) where u = unique referenceable values
   - **Memory Usage**: No intermediate collections, direct reference replacement
-  - **Deduplication**: O(1) lookup time for existing references
+  - **Compaction**: O(1) deduplication lookup, O(1) dictionary prepend operations
+  - **Decompaction**: O(1) reference lookup via pre-built index map
   """
 
   @type compacted_data :: %{
           data: any(),
-          dictionary: %{String.t() => String.t()}
+          dictionary: [String.t()]
         }
 
   @type decompact_result :: {:ok, any()} | {:error, String.t()}
@@ -127,6 +128,7 @@ defmodule DictCompactor do
   - Immediate deduplication using O(1) hash map lookup
   - Direct reference replacement during traversal
   - Preserves original nesting and structure
+  - Efficient O(1) prepend operations for dictionary construction
 
   ## Returns
   A map with `:data` (structure with references) and `:dictionary` (index → value mapping).
@@ -134,26 +136,28 @@ defmodule DictCompactor do
   @spec compact(any()) :: compacted_data()
   def compact(data) do
     # Single pass: collect values and replace with references simultaneously
-    {referenced_data, dictionary, _value_to_index, _counter} = compact_recursive(data, %{}, %{}, 0)
+    {referenced_data, dictionary_list, _value_to_index, _counter} = compact_recursive(data, [], %{}, 0)
 
     %{
       data: referenced_data,
-      dictionary: dictionary
+      dictionary: Enum.reverse(dictionary_list)
     }
   end
 
   @doc """
   Decompacts data from dictionary format back to original structure.
+  
+  Builds an index map once at the beginning for O(1) reference lookups
+  during the restoration process, making decompaction very efficient.
   """
   @spec decompact(compacted_data()) :: decompact_result()
-  def decompact(%{data: data, dictionary: dictionary}) do
+  def decompact(%{data: data, dictionary: dictionary_list}) do
     try do
-      # First deserialize all dictionary values
-      deserialized_dict =
-        deserialize_dictionary_values(dictionary)
+      # First deserialize all dictionary values and build index map
+      index_map = build_index_map(dictionary_list)
 
       # Then replace references in data structure
-      restored_data = replace_references_with_values(data, deserialized_dict)
+      restored_data = replace_references_with_values(data, index_map)
 
       {:ok, restored_data}
     rescue
@@ -164,47 +168,47 @@ defmodule DictCompactor do
   def decompact(_), do: {:error, "Invalid compacted data format"}
 
   # Single-pass recursive compaction
-  defp compact_recursive(data, dictionary, value_to_index, counter) do
+  defp compact_recursive(data, dictionary_list, value_to_index, counter) do
     case data do
       # Handle maps (including structs)
       map when is_map(map) ->
-        compact_map(map, dictionary, value_to_index, counter)
+        compact_map(map, dictionary_list, value_to_index, counter)
 
       # Handle lists
       list when is_list(list) ->
-        compact_list(list, dictionary, value_to_index, counter)
+        compact_list(list, dictionary_list, value_to_index, counter)
 
       # Handle tuples - convert to JSON array format
       tuple when is_tuple(tuple) ->
         tuple_list = Tuple.to_list(tuple)
         {referenced_list, updated_dict, updated_index, final_counter} = 
-          compact_list(tuple_list, dictionary, value_to_index, counter)
+          compact_list(tuple_list, dictionary_list, value_to_index, counter)
         {[@tuple_marker | referenced_list], updated_dict, updated_index, final_counter}
 
       # Handle atoms - serialize as string and reference
       atom when is_atom(atom) and not is_nil(atom) and not is_boolean(atom) ->
         serialized = serialize_atom(atom)
-        get_or_add_reference(serialized, dictionary, value_to_index, counter)
+        get_or_add_reference(serialized, dictionary_list, value_to_index, counter)
 
       # Handle strings - reference them
       string when is_binary(string) ->
-        get_or_add_reference(string, dictionary, value_to_index, counter)
+        get_or_add_reference(string, dictionary_list, value_to_index, counter)
 
       # Return primitives as-is
       primitive ->
-        {primitive, dictionary, value_to_index, counter}
+        {primitive, dictionary_list, value_to_index, counter}
     end
   end
 
-  defp compact_map(map, dictionary, value_to_index, counter) do
+  defp compact_map(map, dictionary_list, value_to_index, counter) do
     # Handle struct name first if it's a struct
     {struct_dict, struct_index, struct_counter, struct_name_ref} = 
       if is_struct(map) do
         struct_name = Atom.to_string(map.__struct__)
-        {ref, dict, idx, cnt} = get_or_add_reference(struct_name, dictionary, value_to_index, counter)
+        {ref, dict, idx, cnt} = get_or_add_reference(struct_name, dictionary_list, value_to_index, counter)
         {dict, idx, cnt, ref}
       else
-        {dictionary, value_to_index, counter, nil}
+        {dictionary_list, value_to_index, counter, nil}
       end
 
     # Convert struct to map for processing
@@ -238,10 +242,10 @@ defmodule DictCompactor do
     {final_map, final_dict, final_index, final_counter}
   end
 
-  defp compact_list(list, dictionary, value_to_index, counter) do
+  defp compact_list(list, dictionary_list, value_to_index, counter) do
     {result_list, final_dict, final_index, final_counter} = 
       list
-      |> Enum.reduce({[], dictionary, value_to_index, counter}, 
+      |> Enum.reduce({[], dictionary_list, value_to_index, counter}, 
         fn item, {acc_list, acc_dict, acc_index, acc_counter} ->
           {referenced_item, dict_after_item, index_after_item, counter_after_item} = 
             compact_recursive(item, acc_dict, acc_index, acc_counter)
@@ -251,31 +255,29 @@ defmodule DictCompactor do
     {Enum.reverse(result_list), final_dict, final_index, final_counter}
   end
 
-  defp get_or_add_reference(value, dictionary, value_to_index, counter) do
+  defp get_or_add_reference(value, dictionary_list, value_to_index, counter) do
     case Map.get(value_to_index, value) do
       nil ->
-        # Add new reference
-        key = Integer.to_string(counter)
-        updated_dict = Map.put(dictionary, key, value)
-        updated_index = Map.put(value_to_index, value, key)
-        {key, updated_dict, updated_index, counter + 1}
+        # Add new reference (prepend for O(1) performance)
+        index = Integer.to_string(counter)
+        updated_dict = [value | dictionary_list]
+        updated_index = Map.put(value_to_index, value, index)
+        {index, updated_dict, updated_index, counter + 1}
       
-      existing_key ->
+      existing_index ->
         # Return existing reference
-        {existing_key, dictionary, value_to_index, counter}
+        {existing_index, dictionary_list, value_to_index, counter}
     end
   end
 
   # Phase 3: Restoration helpers
-  defp replace_references_with_values(data, dictionary) do
+  defp replace_references_with_values(data, index_map) do
     case data do
       # Handle reference strings
       ref when is_binary(ref) ->
-        case Map.get(dictionary, ref) do
-          # Not a reference, return as-is
-          nil -> ref
-          # Found in dictionary, return the value
-          value -> value
+        case Map.get(index_map, ref) do
+          nil -> ref  # Not a reference, return as-is
+          value -> value  # Found in index map, return the value
         end
 
       # Handle maps
@@ -283,8 +285,8 @@ defmodule DictCompactor do
         result =
           map
           |> Enum.map(fn {key, value} ->
-            restored_key = replace_references_with_values(key, dictionary)
-            restored_value = replace_references_with_values(value, dictionary)
+            restored_key = replace_references_with_values(key, index_map)
+            restored_value = replace_references_with_values(value, index_map)
             {restored_key, restored_value}
           end)
           |> Map.new()
@@ -299,13 +301,13 @@ defmodule DictCompactor do
 
       [@tuple_marker | tuple_data] ->
         tuple_data
-        |> replace_references_with_values(dictionary)
+        |> replace_references_with_values(index_map)
         |> List.to_tuple()
 
       # Handle lists
       list when is_list(list) ->
         Enum.map(list, fn item ->
-          replace_references_with_values(item, dictionary)
+          replace_references_with_values(item, index_map)
         end)
 
       # Return primitives as-is
@@ -314,11 +316,11 @@ defmodule DictCompactor do
     end
   end
 
-  defp deserialize_dictionary_values(dictionary) do
-    dictionary
-    |> Enum.map(fn {key, value} ->
-      deserialized_value = deserialize_value(value)
-      {key, deserialized_value}
+  defp build_index_map(dictionary_list) do
+    dictionary_list
+    |> Enum.with_index()
+    |> Enum.map(fn {value, index} ->
+      {Integer.to_string(index), deserialize_value(value)}
     end)
     |> Map.new()
   end
@@ -333,6 +335,7 @@ defmodule DictCompactor do
   end
 
   defp deserialize_value(value), do: value
+
 
   # JSON-compatible serialization helpers
   defp serialize_atom(atom) do

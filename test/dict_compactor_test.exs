@@ -11,17 +11,17 @@ defmodule DictCompactorTest do
       # Numbers, booleans, nil should not be referenced
       assert DictCompactor.compact(42) == %{
                data: 42,
-               dictionary: %{}
+               dictionary: []
              }
 
       assert DictCompactor.compact(true) == %{
                data: true,
-               dictionary: %{}
+               dictionary: []
              }
 
       assert DictCompactor.compact(nil) == %{
                data: nil,
-               dictionary: %{}
+               dictionary: []
              }
     end
 
@@ -30,7 +30,7 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: "0",
-               dictionary: %{"0" => "hello"}
+               dictionary: ["hello"]
              }
     end
 
@@ -39,24 +39,24 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: "0",
-               dictionary: %{"0" => "_:hello"}
+               dictionary: ["_:hello"]
              }
     end
 
     test "does not reference boolean atoms" do
       assert DictCompactor.compact(true) == %{
                data: true,
-               dictionary: %{}
+               dictionary: []
              }
 
       assert DictCompactor.compact(false) == %{
                data: false,
-               dictionary: %{}
+               dictionary: []
              }
 
       assert DictCompactor.compact(nil) == %{
                data: nil,
-               dictionary: %{}
+               dictionary: []
              }
     end
 
@@ -66,12 +66,7 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: %{"0" => "1", "2" => "3"},
-               dictionary: %{
-                 "0" => "name",
-                 "1" => "Alice",
-                 "2" => "role",
-                 "3" => "admin"
-               }
+               dictionary: ["name", "Alice", "role", "admin"]
              }
     end
 
@@ -82,12 +77,7 @@ defmodule DictCompactorTest do
       # Atom keys converted to strings and referenced
       assert result == %{
                data: %{"0" => "1", "2" => "3"},
-               dictionary: %{
-                 "0" => "_:name",
-                 "1" => "Alice",
-                 "2" => "_:role",
-                 "3" => "admin"
-               }
+               dictionary: ["_:name", "Alice", "_:role", "admin"]
              }
     end
 
@@ -97,10 +87,7 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: ["0", 42, "1"],
-               dictionary: %{
-                 "0" => "hello",
-                 "1" => "world"
-               }
+               dictionary: ["hello", "world"]
              }
     end
 
@@ -110,10 +97,7 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: ["__t__", 1, "0", "1"],
-               dictionary: %{
-                 "0" => "hello",
-                 "1" => "_:world"
-               }
+               dictionary: ["hello", "_:world"]
              }
     end
 
@@ -123,14 +107,7 @@ defmodule DictCompactorTest do
 
       assert result == %{
                data: %{"__struct__" => "0", "1" => 30, "2" => "3", "4" => "5"},
-               dictionary: %{
-                 "0" => "Elixir.DictCompactorTest.TestUser",
-                 "1" => "_:age",
-                 "2" => "_:name",
-                 "3" => "Alice",
-                 "4" => "_:role",
-                 "5" => "_:admin"
-               }
+               dictionary: ["Elixir.DictCompactorTest.TestUser", "_:age", "_:name", "Alice", "_:role", "_:admin"]
              }
     end
 
@@ -143,18 +120,12 @@ defmodule DictCompactorTest do
       result = DictCompactor.compact(input)
 
       # "Alice" should appear only once in dictionary
-      alice_count =
-        result.dictionary
-        |> Map.values()
-        |> Enum.count(fn v -> v == "Alice" end)
+      alice_count = Enum.count(result.dictionary, fn v -> v == "Alice" end)
 
       assert alice_count == 1
 
       # "name" should appear only once in dictionary
-      name_count =
-        result.dictionary
-        |> Map.values()
-        |> Enum.count(fn v -> v == "name" end)
+      name_count = Enum.count(result.dictionary, fn v -> v == "name" end)
 
       assert name_count == 1
     end
@@ -164,19 +135,13 @@ defmodule DictCompactorTest do
       result = DictCompactor.compact(input)
 
       # "_:admin" should appear only once in dictionary
-      admin_count =
-        result.dictionary
-        |> Map.values()
-        |> Enum.count(fn v -> v == "_:admin" end)
+      admin_count = Enum.count(result.dictionary, fn v -> v == "_:admin" end)
 
       assert admin_count == 1
 
       assert result == %{
                data: ["0", "0", "1", "0"],
-               dictionary: %{
-                 "0" => "_:admin",
-                 "1" => "_:user"
-               }
+               dictionary: ["_:admin", "_:user"]
              }
     end
 
@@ -191,18 +156,12 @@ defmodule DictCompactorTest do
       result = DictCompactor.compact(input)
 
       # "localhost" should be deduplicated
-      localhost_count =
-        result.dictionary
-        |> Map.values()
-        |> Enum.count(fn v -> v == "localhost" end)
+      localhost_count = Enum.count(result.dictionary, fn v -> v == "localhost" end)
 
       assert localhost_count == 1
 
       # "host" should be deduplicated
-      host_count =
-        result.dictionary
-        |> Map.values()
-        |> Enum.count(fn v -> v == "host" end)
+      host_count = Enum.count(result.dictionary, fn v -> v == "host" end)
 
       assert host_count == 1
     end
@@ -219,29 +178,29 @@ defmodule DictCompactorTest do
     test "handles empty structures" do
       assert DictCompactor.compact(%{}) == %{
                data: %{},
-               dictionary: %{}
+               dictionary: []
              }
 
       assert DictCompactor.compact([]) == %{
                data: [],
-               dictionary: %{}
+               dictionary: []
              }
     end
   end
 
   describe "decompact/1" do
     test "handles primitive values" do
-      compacted = %{data: 42, dictionary: %{}}
+      compacted = %{data: 42, dictionary: []}
       assert DictCompactor.decompact(compacted) == {:ok, 42}
 
-      compacted = %{data: "hello", dictionary: %{}}
+      compacted = %{data: "hello", dictionary: []}
       assert DictCompactor.decompact(compacted) == {:ok, "hello"}
     end
 
     test "decompacts simple string references" do
       compacted = %{
         data: "0",
-        dictionary: %{"0" => "hello"}
+        dictionary: ["hello"]
       }
 
       assert DictCompactor.decompact(compacted) == {:ok, "hello"}
@@ -250,7 +209,7 @@ defmodule DictCompactorTest do
     test "decompacts atom string references" do
       compacted = %{
         data: "0",
-        dictionary: %{"0" => "_:hello"}
+        dictionary: ["_:hello"]
       }
 
       assert DictCompactor.decompact(compacted) == {:ok, :hello}
@@ -259,12 +218,7 @@ defmodule DictCompactorTest do
     test "decompacts maps with string references" do
       compacted = %{
         data: %{"0" => "1", "2" => "3"},
-        dictionary: %{
-          "0" => "name",
-          "1" => "Alice",
-          "2" => "role",
-          "3" => "admin"
-        }
+        dictionary: ["name", "Alice", "role", "admin"]
       }
 
       expected = %{"name" => "Alice", "role" => "admin"}
@@ -274,10 +228,7 @@ defmodule DictCompactorTest do
     test "decompacts tuple arrays back to tuples" do
       compacted = %{
         data: ["__t__", 1, "0", "1"],
-        dictionary: %{
-          "0" => "hello",
-          "1" => "_:world"
-        }
+        dictionary: ["hello", "_:world"]
       }
 
       assert DictCompactor.decompact(compacted) == {:ok, {1, "hello", :world}}
@@ -291,14 +242,7 @@ defmodule DictCompactorTest do
           "3" => "4",
           "__struct__" => "5"
         },
-        dictionary: %{
-          "0" => "_:name",
-          "1" => "Alice",
-          "2" => "_:age",
-          "3" => "_:role",
-          "4" => "_:admin",
-          "5" => "Elixir.DictCompactorTest.TestUser"
-        }
+        dictionary: ["_:name", "Alice", "_:age", "_:role", "_:admin", "Elixir.DictCompactorTest.TestUser"]
       }
 
       expected = %TestUser{name: "Alice", age: 30, role: :admin}
@@ -311,14 +255,7 @@ defmodule DictCompactorTest do
           "0" => %{"1" => "2", "3" => 5432},
           "4" => %{"1" => "2", "5" => 300}
         },
-        dictionary: %{
-          "0" => "database",
-          "1" => "host",
-          "2" => "localhost",
-          "3" => "port",
-          "4" => "cache",
-          "5" => "ttl"
-        }
+        dictionary: ["database", "host", "localhost", "port", "cache", "ttl"]
       }
 
       expected = %{
@@ -333,15 +270,15 @@ defmodule DictCompactorTest do
       assert DictCompactor.decompact("not a map") == {:error, "Invalid compacted data format"}
       assert DictCompactor.decompact(%{data: "test"}) == {:error, "Invalid compacted data format"}
 
-      assert DictCompactor.decompact(%{dictionary: %{}}) ==
+      assert DictCompactor.decompact(%{dictionary: []}) ==
                {:error, "Invalid compacted data format"}
     end
 
     test "handles missing dictionary references gracefully" do
       compacted = %{
-        # "99" doesn't exist in dictionary
+        # "99" doesn't exist in dictionary (out of bounds)
         data: %{"0" => "99"},
-        dictionary: %{"0" => "name"}
+        dictionary: ["name"]
       }
 
       # Should return the reference as-is if not found in dictionary
@@ -427,8 +364,7 @@ defmodule DictCompactorTest do
       assert restored == original
 
       # Verify deduplication happened
-      dict_values = Map.values(compacted.dictionary)
-      localhost_count = Enum.count(dict_values, fn v -> v == "localhost" end)
+      localhost_count = Enum.count(compacted.dictionary, fn v -> v == "localhost" end)
       # "localhost" appears only once
       assert localhost_count == 1
     end
@@ -476,8 +412,7 @@ defmodule DictCompactorTest do
       assert restored == large_list
 
       # Verify deduplication
-      dict_values = Map.values(compacted.dictionary)
-      common_atom_count = Enum.count(dict_values, fn v -> v == "_:common_atom" end)
+      common_atom_count = Enum.count(compacted.dictionary, fn v -> v == "_:common_atom" end)
       assert common_atom_count == 1
     end
 
