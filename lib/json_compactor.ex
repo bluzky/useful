@@ -135,7 +135,7 @@ defmodule JsonCompactor do
   def compact(data) do
     # Always return a list
     if needs_compaction_reference?(data) do
-      {_compacted, lookup_table} = build_lookup_table_bfs(data)
+      {_compacted, lookup_table} = build_lookup_table_dfs(data)
 
       # Convert lookup table to array format
       array =
@@ -204,12 +204,12 @@ defmodule JsonCompactor do
 
   def decompact(_primitive_value), do: {:error, "Input must be a list"}
 
-  # Build lookup table using breadth-first search
-  @spec build_lookup_table_bfs(json_value()) :: {String.t() | json_value(), map()}
-  defp build_lookup_table_bfs(root) do
-    # Phase 1: BFS to collect all unique values and assign indices
-    queue = :queue.in(root, :queue.new())
-    {value_to_index, _} = bfs_collect_values(queue, %{}, 0)
+  # Build lookup table using depth-first search
+  @spec build_lookup_table_dfs(json_value()) :: {String.t() | json_value(), map()}
+  defp build_lookup_table_dfs(root) do
+    # Phase 1: DFS to collect all unique values and assign indices
+    stack = [root]
+    {value_to_index, _} = dfs_collect_values(stack, %{}, 0)
 
     # Phase 2: Build compacted versions of complex structures
     final_lookup = build_compacted_structures(value_to_index)
@@ -218,9 +218,9 @@ defmodule JsonCompactor do
     {Integer.to_string(root_index), final_lookup}
   end
 
-  # Helper function to add children to queue with batch processing
-  @spec add_children_to_queue(json_value(), :queue.queue()) :: :queue.queue()
-  defp add_children_to_queue(value, queue) do
+  # Helper function to add children to stack 
+  @spec add_children_to_stack(json_value(), [json_value()]) :: [json_value()]
+  defp add_children_to_stack(value, stack) do
     case value do
       map when is_map(map) ->
         clean_map = Map.delete(map, :__struct__)
@@ -230,55 +230,51 @@ defmodule JsonCompactor do
         values = Map.values(clean_map)
         children = keys ++ values
 
-        add_children_batch(children, queue)
+        # Prepend children to stack (DFS order)
+        children ++ stack
 
       list when is_list(list) ->
-        add_children_batch(list, queue)
+        # Prepend list items to stack
+        list ++ stack
 
       tuple when is_tuple(tuple) ->
-        add_children_batch(Tuple.to_list(tuple), queue)
+        # Prepend tuple elements to stack
+        Tuple.to_list(tuple) ++ stack
 
       _primitive ->
         # Strings and other primitives don't have children
-        queue
+        stack
     end
   end
 
-  # Batch add children to queue for better performance
-  @spec add_children_batch([json_value()], :queue.queue()) :: :queue.queue()
-  defp add_children_batch(children, queue) do
-    Enum.reduce(children, queue, &:queue.in/2)
+  # Phase 1: DFS traversal to collect values that need references (maps, lists, strings)
+  @spec dfs_collect_values([json_value()], map(), non_neg_integer()) :: {map(), non_neg_integer()}
+  defp dfs_collect_values([], value_to_index, counter) do
+    # Empty stack - traversal complete
+    {value_to_index, counter}
   end
 
-  # Phase 1: BFS traversal to collect values that need references (maps, lists, strings)
-  @spec bfs_collect_values(:queue.queue(), map(), non_neg_integer()) :: {map(), non_neg_integer()}
-  defp bfs_collect_values(queue, value_to_index, counter) do
-    case :queue.out(queue) do
-      {{:value, value}, remaining_queue} ->
-        case Map.get(value_to_index, value) do
-          nil ->
-            # Check if this value needs to be stored in reference table
-            if needs_reference?(value) do
-              # Store value and assign index
-              updated_index_map = Map.put(value_to_index, value, counter)
-              new_counter = counter + 1
+  defp dfs_collect_values([value | remaining_stack], value_to_index, counter) do
+    case Map.get(value_to_index, value) do
+      nil ->
+        # Check if this value needs to be stored in reference table
+        if needs_reference?(value) do
+          # Store value and assign index
+          updated_index_map = Map.put(value_to_index, value, counter)
+          new_counter = counter + 1
 
-              # Add children to queue
-              children_queue = add_children_to_queue(value, remaining_queue)
-              bfs_collect_values(children_queue, updated_index_map, new_counter)
-            else
-              # For non-reference values (numbers, booleans, etc.), still traverse children
-              children_queue = add_children_to_queue(value, remaining_queue)
-              bfs_collect_values(children_queue, value_to_index, counter)
-            end
-
-          _existing_index ->
-            # Value already seen, skip and continue
-            bfs_collect_values(remaining_queue, value_to_index, counter)
+          # Add children to stack
+          children_stack = add_children_to_stack(value, remaining_stack)
+          dfs_collect_values(children_stack, updated_index_map, new_counter)
+        else
+          # For non-reference values (numbers, booleans, etc.), still traverse children
+          children_stack = add_children_to_stack(value, remaining_stack)
+          dfs_collect_values(children_stack, value_to_index, counter)
         end
 
-      {:empty, _} ->
-        {value_to_index, counter}
+      _existing_index ->
+        # Value already seen, skip and continue
+        dfs_collect_values(remaining_stack, value_to_index, counter)
     end
   end
 
